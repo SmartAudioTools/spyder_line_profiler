@@ -14,8 +14,11 @@ jobs:
       fail-fast: false
       matrix:
         OS: ['ubuntu', 'macos', 'windows']
-        PYTHON_VERSION: ['3.9', '3.10', '3.11']
+        PYTHON_VERSION: ['3.10', '3.11', '3.12']
         SPYDER_SOURCE: ['conda', 'git']
+        exclude:
+          - OS: ['macos', 'windows']
+            PYTHON_VERSION: ['3.11']
     name: ${{ matrix.OS }} py${{ matrix.PYTHON_VERSION }} spyder-from-${{ matrix.SPYDER_SOURCE }}
     runs-on: ${{ matrix.OS }}-latest
     env:
@@ -36,6 +39,7 @@ jobs:
         with:
            miniforge-version: latest
            auto-update-conda: true
+           conda-remove-defaults: "true"
            python-version: ${{ matrix.PYTHON_VERSION }}
       - name: Checkout Spyder from git
         if: matrix.SPYDER_SOURCE == 'git'

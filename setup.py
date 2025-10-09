@@ -72,7 +72,7 @@ setup(
     install_requires=REQUIREMENTS,
     url='https://github.com/spyder-ide/spyder-line-profiler',
     license='MIT',
-    python_requires='>= 3.8',
+    python_requires='>= 3.10',
     entry_points={
         "spyder.plugins": [
             "spyder_line_profiler = spyder_line_profiler.spyder.plugin:SpyderLineProfiler"
@@ -89,8 +89,6 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Operating System :: OS Independent',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.8',
-        'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
