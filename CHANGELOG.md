@@ -1,5 +1,19 @@
 # History of changes
 
+## Version 0.4.2 (2025/10/11)
+
+This version fixes a bug and makes the plugin compatible with Spyder 6.1.
+
+### Bug fix
+
+* Fix shortcut to run profiler ([PR 100](https://github.com/spyder-ide/spyder-line-profiler/pull/100) by [@rear1019](https://github.com/rear1019))
+
+### Maintenance
+
+* Define run configuration options to make plugin compatible with Spyder 6.1 ([Issue 101](https://github.com/spyder-ide/spyder-line-profiler/issues/101), [Issue 104](https://github.com/spyder-ide/spyder-line-profiler/issues/104), ([PR 105](https://github.com/spyder-ide/spyder-line-profiler/pull/105))
+* Drop Python 3.8 and Python 3.9 ([PR 102](https://github.com/spyder-ide/spyder-line-profiler/pull/102))
+
+
 ## Version 0.4.1 (2025/03/10)
 
 This release contains some bug fixes. Thanks to [@rear1019](https://github.com/rear1019) who contributed all the changes except for the last PR.
