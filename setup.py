@@ -41,7 +41,7 @@ def get_package_data(name, extlist):
 
 
 # Requirements
-REQUIREMENTS = ['line_profiler', 'qtawesome', 'spyder>=6,<7']
+REQUIREMENTS = ['line_profiler', 'qtawesome', 'spyder>=6.1,<6.2']
 EXTLIST = ['.jpg', '.png', '.json', '.mo', '.ini']
 LIBNAME = 'spyder_line_profiler'
 

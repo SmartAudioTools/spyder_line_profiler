@@ -21,8 +21,6 @@ from spyder.api.translations import get_translation
 from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
 from spyder.plugins.mainmenu.api import ApplicationMenus, RunMenuSections
-from spyder.plugins.profiler.widgets.run_conf import (
-    ProfilerPyConfigurationGroup)
 from spyder.plugins.run.api import RunContext, RunExecutor, run_execute
 from spyder.utils.icon_manager import ima
 
@@ -32,6 +30,7 @@ from spyder_line_profiler.spyder.config import (
 from spyder_line_profiler.spyder.confpage import SpyderLineProfilerConfigPage
 from spyder_line_profiler.spyder.widgets import (
     SpyderLineProfilerWidget, is_lineprofiler_installed)
+from spyder_line_profiler.spyder.run_conf import LineProfilerConfigurationGroup
 
 # Localization
 _ = get_translation("spyder_line_profiler.spyder")
@@ -82,7 +81,7 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
                     'name': 'File'
                 },
                 'output_formats': [],
-                'configuration_widget': ProfilerPyConfigurationGroup,
+                'configuration_widget': LineProfilerConfigurationGroup,
                 'requires_cwd': True,
                 'priority': 7
             }
