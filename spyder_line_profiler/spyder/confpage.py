@@ -34,6 +34,13 @@ class SpyderLineProfilerConfigPage(PluginConfigPage):
         use_color_box = self.create_checkbox(
             _("Use deterministic colors to differentiate functions"),
             'use_colors', default=True)
+        # Ajout SmartOS : profiler TOUTES les fonctions des modules utilisateur du projet,
+        # sans marquage (option, cf. profile_targets.config_lanceur). Cochee = run plus lent
+        # (line-profiler ajoute un surcout par ligne sur chaque fonction).
+        profile_all_box = self.create_checkbox(
+            _("Profiler TOUTES les fonctions des modules utilisateur du projet "
+              "(sans marquage) - ralentit le run"),
+            'profile_all_user', default=False)
 
         results_group = QGroupBox(_("Results"))
         results_label1 = QLabel(_("Line profiler plugin results "
@@ -51,6 +58,7 @@ class SpyderLineProfilerConfigPage(PluginConfigPage):
 
         settings_layout = QVBoxLayout()
         settings_layout.addWidget(use_color_box)
+        settings_layout.addWidget(profile_all_box)  # SmartOS
         settings_group.setLayout(settings_layout)
 
         results_layout = QVBoxLayout()

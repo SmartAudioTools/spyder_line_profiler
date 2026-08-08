@@ -275,9 +275,42 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         self.log_action.setEnabled(False)
         self.save_action.setEnabled(False)
 
+        # SmartOS (patch_spyder_lineprofiler_toolbar.py) : le menu burger de ce dock etait vide
+        # - il ne contenait que les quatre actions de dock ajoutees d'office par PluginMainWidget.
+        # Il recoit ici le pliage de l'arbre, les actions de sortie et de donnees, et le bouton
+        # "parcourir" ; les deux barres se reduisent d'autant.
+        # SmartOS : libelles FRANCAIS explicites. Ce greffon n'a AUCUN catalogue de traduction
+        # (Spyder le journalise au demarrage : "No translation file found for domain
+        # 'spyder_line_profiler.spyder'"), et ses libelles ne se voyaient pas jusqu'ici - boutons a
+        # icone seule, le texte ne servant qu'a l'infobulle. Dans un menu ils se LISENT, et ils
+        # melangeaient anglais, francais et une coquille amont ("Collaps"). On ne passe pas par _()
+        # : sans catalogue, il rendrait la chaine inchangee.
+        for item, libelle in [
+            (self.collapse_action, "Tout replier"),
+            (self.expand_action, "Tout déplier"),
+            (self.log_action, "Sortie complète"),
+            (self.clear_action, "Effacer la sortie"),
+            (self.browse_action, "Sélectionner un fichier Python"),
+        ]:
+            item.setText(libelle)
+
+        options_menu = self.get_options_menu()
+        for item in [self.collapse_action, self.expand_action]:
+            self.add_item_to_menu(
+                item, menu=options_menu, section="smartos_lp_tree"
+            )
+        for item in [self.log_action, self.save_action, self.clear_action,
+                     self.browse_action]:
+            self.add_item_to_menu(
+                item, menu=options_menu, section="smartos_lp_data"
+            )
+
         # Main Toolbar
+        # SmartOS : la liste des fichiers et les deux commandes qui font le travail. "Open Script"
+        # (parcourir) est dans le menu burger : on profile presque toujours le fichier courant, et
+        # la liste deroulante garde de toute facon l'historique.
         toolbar = self.get_main_toolbar()
-        for item in [self.filecombo, self.browse_action, self.start_action,
+        for item in [self.filecombo, self.start_action,
                      self.stop_action]:
             self.add_item_to_toolbar(
                 item,
@@ -286,17 +319,14 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             )
 
         # Secondary Toolbar
+        # SmartOS : reduite a la date de la derniere mesure, centree entre ses deux etirements.
         secondary_toolbar = self.create_toolbar(
             SpyderLineProfilerWidgetToolbars.Information)
-        for item in [self.collapse_action, self.expand_action,
-                     self.create_stretcher(
+        for item in [self.create_stretcher(
                          id_=SpyderLineProfilerWidgetInformationToolbarItems.Stretcher1),
                      self.datelabel,
                      self.create_stretcher(
-                         id_=SpyderLineProfilerWidgetInformationToolbarItems.Stretcher2),
-                     self.log_action,
-                     self.save_action,
-                     self.clear_action]:
+                         id_=SpyderLineProfilerWidgetInformationToolbarItems.Stretcher2)]:
             self.add_item_to_toolbar(
                 item,
                 toolbar=secondary_toolbar,
@@ -420,7 +450,36 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         #
         # UTF-8 mode also changes the encoding of stdin/stdout/stdout which must
         # be taken into account when using stdandard I/O.
-        p_args = ['-X', 'utf8', '-m', 'kernprof', '-lvb', '-o', self.DATAPATH]
+        # Lanceur SmartOS (cf. patch_spyder_line_profiler_targets.py et lp_launcher.py) :
+        # remplace kernprof. Execution UNIQUE du script, decoration AST des seuls `def`
+        # marques (ou de tout le code utilisateur si l'option est cochee), et cProfile
+        # enveloppant la seule execution du script : les chiffres du panneau Profileur
+        # sont ceux du code de l'utilisateur, pas de la machinerie du profileur.
+        # logger.debug et NON warning : sans gestionnaire, le logging retombe sur stderr,
+        # que la console interne de Spyder traite comme des erreurs.
+        from spyder_line_profiler.spyder.profile_targets import ecrire_config_lanceur
+        self._smartos_prof_path = get_conf_path('lineprofiler_cprofile.prof')
+        _smartos_lp_launcher = os.path.join(os.path.dirname(__file__), 'lp_launcher.py')
+        _smartos_lp_config = get_conf_path('lineprofiler_targets.json')
+        ecrire_config_lanceur(filename, _smartos_lp_config, log=logger.debug)
+        p_args = ['-X', 'utf8', _smartos_lp_launcher,
+                  '--lprof', self.DATAPATH, '--prof', self._smartos_prof_path,
+                  '--config', _smartos_lp_config]
+        # Redirection Pyxel (ajout SmartOS, cf. patch_spyder_line_profiler_targets.py) :
+        # si le script profile importe pyxel, son ecran doit apparaitre dans le panneau
+        # Pyxel plutot que dans sa propre fenetre SDL - best-effort, sans consequence pour
+        # un script ordinaire ni si le greffon Pyxel n'est pas installe.
+        try:
+            from spyder_pyxel.spyder.bridge_manager import get_bridge as _smartos_get_bridge
+            import spyder_pyxel as _smartos_spyder_pyxel
+            _smartos_pyxel_bridge_dir = os.path.dirname(
+                os.path.dirname(_smartos_spyder_pyxel.__file__))
+            _smartos_pyxel_shm = _smartos_get_bridge().attach_process(self)
+        except Exception:
+            _smartos_pyxel_shm = None
+        if _smartos_pyxel_shm:
+            p_args += ['--pyxel-shm', _smartos_pyxel_shm,
+                       '--pyxel-bridge-path', _smartos_pyxel_bridge_dir]
 
         if os.name == 'nt':
             # On Windows, one has to replace backslashes by slashes to avoid
@@ -473,6 +532,12 @@ class SpyderLineProfilerWidget(PluginMainWidget):
 
     def finished(self):
         self.timer.stop()
+        # Redirection Pyxel (ajout SmartOS) : libere le canal cree avant le lancement.
+        try:
+            from spyder_pyxel.spyder.bridge_manager import get_bridge as _smartos_get_bridge
+            _smartos_get_bridge().detach_console(self)  # SmartOS
+        except Exception:
+            pass
         self.set_running_state(False)
         self.output = self.error_output + self.output
         if not self.output == 'aborted':
@@ -483,12 +548,23 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         self.sig_finished.emit()
 
     def kill_if_running(self):
-        self.datelabel.setText(_('Profiling aborted.'))
+        # Arret gracieux (ajout SmartOS, cf. patch_spyder_line_profiler_targets.py) :
+        # SIGTERM d'abord (lp_launcher.py l'attrape et ecrit ses mesures partielles),
+        # SIGKILL en repli si le processus ne repond pas dans le delai.
         if self.process is not None:
             if self.process.state() == QProcess.Running:
-                self.process.kill()
-                self.output = 'aborted'
-                self.process.waitForFinished()
+                self.process.terminate()
+                if self.process.waitForFinished(5000):
+                    self.datelabel.setText(_('Profiling interrupted.'))
+                else:
+                    self.process.kill()
+                    self.output = 'aborted'
+                    self.datelabel.setText(_('Profiling aborted.'))
+                    self.process.waitForFinished()
+            else:
+                self.datelabel.setText(_('Profiling aborted.'))
+        else:
+            self.datelabel.setText(_('Profiling aborted.'))
 
     @on_conf_change(section='pythonpath_manager', option='spyder_pythonpath')
     def _update_pythonpath(self, value):
@@ -496,6 +572,10 @@ class SpyderLineProfilerWidget(PluginMainWidget):
 
     def clear_data(self):
         self.datatree.clear()
+        # Le bouton d'effacement du panneau vide aussi l'editeur (ajout SmartOS) : sans cela
+        # les lignes resteraient colorees par un profilage que l'utilisateur vient d'effacer.
+        from spyder_line_profiler.spyder.profile_results import clear as _smartos_clear_results
+        _smartos_clear_results()
         self.clear_action.setEnabled(False)
         self.log_action.setEnabled(False)
         self.save_action.setEnabled(False)
@@ -515,6 +595,41 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             return
 
         self.datatree.load_data(self.DATAPATH)
+
+        # Profilage COMBINE, point 2 (ajout SmartOS) : le pstats cProfile produit par le run
+        # enveloppe (self._smartos_prof_path) est pousse dans le panneau Profileur integre, via
+        # show_profile_buffer - exactement ce que fait le noyau apres un profilage. Cf.
+        # Commun/scripts/patch_spyder_line_profiler_targets.py.
+        def _smartos_feed_profiler(self=self):
+            _smartos_prof = getattr(self, '_smartos_prof_path', None)
+            if not _smartos_prof:
+                return
+            try:
+                import os.path as _smartos_osp
+                from spyder.api.plugins import Plugins as _SmartosPlugins
+                if not _smartos_osp.isfile(_smartos_prof):
+                    return
+                _smartos_profiler = self.get_plugin().get_plugin(
+                    _SmartosPlugins.Profiler, error=False)
+                if _smartos_profiler is None:
+                    return
+                _smartos_sub = _smartos_profiler.get_widget().current_widget()
+                if _smartos_sub is None:
+                    return
+                with open(_smartos_prof, 'rb') as _smartos_f:
+                    _smartos_sub.show_profile_buffer(_smartos_f.read(), [])
+            except Exception:
+                import traceback as _smartos_tb
+                _smartos_tb.print_exc()
+        _smartos_feed_profiler()
+
+        # Publication des resultats vers les editeurs ouverts (ajout SmartOS, cf.
+        # Commun/scripts/patch_spyder_line_profiler_targets.py) : lignes colorees et temps dans
+        # la marge de droite. On se greffe ICI, apres le chargement par l'arbre du panneau, pour
+        # relire le MEME fichier au MEME moment - donc jamais de desynchronisation entre ce que
+        # montre le panneau et ce que montre l'editeur.
+        from spyder_line_profiler.spyder.profile_results import publish
+        publish(self.DATAPATH)
         QApplication.processEvents()
         self.datatree.show_tree()
 

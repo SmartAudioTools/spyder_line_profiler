@@ -43,7 +43,7 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
 
     NAME = "spyder_line_profiler"
     REQUIRES = [Plugins.Preferences, Plugins.Editor, Plugins.Run]
-    OPTIONAL = []
+    OPTIONAL = [Plugins.Profiler]  # SmartOS : profilage combine (point 2)
     TABIFY = [Plugins.Help]
     WIDGET_CLASS = SpyderLineProfilerWidget
     CONF_SECTION = CONF_SECTION
@@ -113,6 +113,16 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
         editor = self.get_plugin(Plugins.Editor)
         widget.sig_edit_goto_requested.connect(editor.load)
 
+        # Marqueurs "profiler cette fonction" dans la marge (ajout SmartOS, cf.
+        # Commun/scripts/patch_spyder_line_profiler_targets.py). sig_codeeditor_created /
+        # _deleted sont l'API publique par laquelle le debogueur de Spyder installe sa propre
+        # marge de points d'arret : rien a patcher dans le coeur de Spyder.
+        editor.sig_codeeditor_created.connect(self._smartos_add_codeeditor)
+        editor.sig_codeeditor_deleted.connect(self._smartos_remove_codeeditor)
+        # Purge des marqueurs des fichiers non reouverts, une fois la session RESTAUREE
+        # (sig_open_files_finished) : "un marqueur = un fichier ouvert".
+        editor.sig_open_files_finished.connect(self._smartos_purge_fichiers_fermes)
+
     @on_plugin_available(plugin=Plugins.Preferences)
     def on_preferences_available(self):
         preferences = self.get_plugin(Plugins.Preferences)
@@ -136,6 +146,11 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
         widget = self.get_widget()
         editor = self.get_plugin(Plugins.Editor)
         widget.sig_edit_goto_requested.disconnect(editor.load)
+
+        # Ajout SmartOS (marqueurs de profilage dans la marge).
+        editor.sig_codeeditor_created.disconnect(self._smartos_add_codeeditor)
+        editor.sig_codeeditor_deleted.disconnect(self._smartos_remove_codeeditor)
+        editor.sig_open_files_finished.disconnect(self._smartos_purge_fichiers_fermes)
 
     def check_compatibility(self):
         valid = True
@@ -163,3 +178,26 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
         args = params['args']
 
         self.get_widget().analyze(filename, wdir=wdir, args=args)
+    # <<< SmartOS line profiler : debut du bloc injecte >>>
+    # Marges du line profiler (marqueurs a gauche, temps a droite). Cf.
+    # Commun/scripts/patch_spyder_line_profiler_targets.py.
+
+    def _smartos_add_codeeditor(self, codeeditor):
+        """Installe les deux marges du line profiler sur un editeur Python."""
+        # Import tardif : ces modules tirent qtawesome et des modules d'editeur de Spyder,
+        # inutiles tant qu'aucun fichier n'est ouvert.
+        from spyder_line_profiler.spyder.profile_targets import attach_editor
+        attach_editor(codeeditor)
+
+    def _smartos_remove_codeeditor(self, codeeditor):
+        """Detache les marges quand l'editeur est ferme."""
+        from spyder_line_profiler.spyder.profile_targets import detach_editor
+        detach_editor(codeeditor)
+
+    def _smartos_purge_fichiers_fermes(self):
+        """A la fin de la restauration de session : purge les marqueurs des fichiers non
+        reouverts (fermes lors d'une session precedente). Cf. profile_targets."""
+        from spyder_line_profiler.spyder.profile_targets import (
+            purger_marqueurs_des_fichiers_fermes)
+        purger_marqueurs_des_fichiers_fermes()
+    # <<< SmartOS line profiler : fin du bloc injecte >>>
