@@ -14,7 +14,7 @@
 set -e
 cd "$(dirname "$0")/.."
 
-PYTHON="${SPYDER_LINE_PROFILER_PYTHON:-/DATA/Python/SmartPython/CachyOS/versions/Spyder/bin/python}"
+PYTHON="${SPYDER_LINE_PROFILER_PYTHON:-/DATA/Python/SmartPython/CachyOS/versions/SmartPythonEditor/bin/python}"
 
 export QT_QPA_PLATFORM=offscreen
 
