@@ -19,7 +19,12 @@ cp spyder_line_profiler/spyder/{lp_launcher,profile_cprofile,profile_history,pro
 cp -r tools smartos_tests "$SAUVE/"
 git fetch upstream "refs/tags/v${VERSION}:refs/tags/v${VERSION}" --force
 git checkout -B smartos "refs/tags/v${VERSION}"
-git clean -fdx && git reset --hard "refs/tags/v${VERSION}"
+# -e .claude : meme piege que reconstruire.sh du generateur (04/10/2026). .claude/ n'est pas
+# suivi par git, et .claude/conversations est la source du bind-mount des transcripts de session
+# (Commun/scripts/claude_compte_isole.sh) : sans cette exclusion, une reconstruction detruit les
+# conversations de toute session ouverte sur ce depot, en silence. Ce depot-ci n'en heberge aucune
+# aujourd'hui, l'exclusion est posee pour le jour ou une session y travaillera.
+git clean -fdx -e .claude && git reset --hard "refs/tags/v${VERSION}"
 cp -r "$SAUVE/tools" "$SAUVE/smartos_tests" .
 cp "$SAUVE"/*.py spyder_line_profiler/spyder/
 python3 tools/patch_spyder_line_profiler_targets.py spyder_line_profiler/spyder
