@@ -742,7 +742,7 @@ def test_un_clic_dans_la_case_punaise_la_ligne_puis_la_depunaise():
             assert droite._x_bouton() == droite.PADDING + droite._case_punaise()
             y = editor.blockBoundingGeometry(editor.document().findBlockByNumber(numero - 1)) \
                 .translated(editor.contentOffset()).center().y()
-            position = QPoint(droite.PADDING + droite.TAILLE_ICONE // 2, int(y))
+            position = QPoint(droite.PADDING + droite.TAILLE_PUNAISE // 2, int(y))
 
             # QTest.mouseMove ne livre pas de mouseMoveEvent hors ecran : appel direct.
             from qtpy.QtCore import QEvent, QPointF
@@ -764,8 +764,23 @@ def test_un_clic_dans_la_case_punaise_la_ligne_puis_la_depunaise():
             assert manager.est_punaisee(numero + 1) and not manager.est_punaisee(numero)
             editor.set_text(SOURCE)
             manager.refresh()
-            # Meme geste, meme endroit : depunaise.
-            QTest.mouseClick(droite, Qt.LeftButton, pos=position)
+            # Meme geste, meme endroit : depunaise - du PREMIER clic, meme si la mesure montree
+            # n'est plus celle punaisee (utilisateur, 31/10/2026 : « un premier clic sur une
+            # punaise de la décoche pas » : il repunaisait la mesure neuve).
+            for groupes in pr._punaises().values():
+                for groupe in groupes:
+                    for valeur in groupe['lignes'].values():
+                        valeur['seconds'] *= 2
+            manager.refresh()
+            assert manager.est_punaisee(numero)
+            assert not manager.punaise_identique({('temps', numero): droite._lignes[numero]})
+            QTest.mousePress(droite, Qt.LeftButton, pos=position)
+            # Pendant l'appui, et seulement la, la punaise s'eclaircit (« la couleur doit devenir
+            # plus blanche pendant le clic, pas pendant le survol »).
+            assert droite._presse_punaise == numero, droite._presse_punaise
+            droite.grab()
+            QTest.mouseRelease(droite, Qt.LeftButton, pos=position)
+            assert droite._presse_punaise is None
             QApplication.processEvents()
             assert numero not in gauche._lignes and not manager.est_punaisee(numero)
             assert pr._PUNAISES == {}, pr._PUNAISES

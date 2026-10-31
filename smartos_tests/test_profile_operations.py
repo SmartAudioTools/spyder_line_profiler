@@ -434,7 +434,12 @@ def test_la_punaise_du_def_punaise_la_fonction_entiere():
             manager.refresh()
             assert manager.chaleur(4) == manager.operations[4].heat > 0, manager.chaleur(4)
             assert manager.chaleur(1) == 1.0, manager.chaleur(1)
-            manager.basculer_punaise(derniere._valeurs_punaise(1))
+            # Une punaise d'une AUTRE nature dans la fonction (posee depuis une zone des temps) : le
+            # clic sur le `def` la retire aussi (utilisateur, 31/10/2026 : « quand je désélectionne
+            # la punaise sur une ligne def, elle ne décoche que certaines punaises de la fonction »).
+            pr._punaises()[osp.normcase(source)].append(
+                {'source': _editor.toPlainText(), 'nature': 'temps', 'lignes': {'3': {}}})
+            manager.basculer_punaise(derniere._valeurs_punaise(1), derniere._etendue_punaise(1))
             assert pr._PUNAISES == {}, pr._PUNAISES
     finally:
         pr._PUNAISES = {}

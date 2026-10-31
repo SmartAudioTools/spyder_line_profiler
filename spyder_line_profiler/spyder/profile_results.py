@@ -69,8 +69,8 @@ import os.path as osp
 import pickle
 import shutil
 
-from qtpy.QtCore import QEvent, QObject, QPoint, QRect, QRectF, QSize, Qt, Signal
-from qtpy.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QRegion
+from qtpy.QtCore import QEvent, QObject, QPoint, QPointF, QRect, QRectF, QSize, Qt, Signal
+from qtpy.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPolygonF, QRegion
 from qtpy.QtWidgets import QMenu, QToolTip, QWidget
 
 
@@ -834,14 +834,30 @@ def punaise_identique(filename, texte, valeurs):
         for cle, mesure in valeurs.items())
 
 
-def basculer_punaise(filename, texte, valeurs):
+def basculer_punaise(filename, texte, valeurs, etendue=None):
     """Punaise les `valeurs` ({(nature, ligne): mesure}) ; si elles le sont deja a l'identique, les
-    depunaise (meme geste, meme endroit). Renvoie True si punaise, False si depunaise."""
+    depunaise (meme geste, meme endroit). Renvoie True si punaise, False si depunaise.
+
+    `etendue` (premiere, derniere) : ce que retire la depunaise - TOUTES les punaises de ces lignes,
+    quelle que soit leur nature ou leur presence dans la mesure montree. Sans elle, depunaiser un
+    `def` laissait les punaises de l'autre nature et celles des lignes absentes de cette mesure
+    (utilisateur, 31/10/2026 : « quand je désélectionne la punaise sur une ligne def, elle ne
+    décoche que certaines punaises de la fonction »)."""
     fichier = osp.normcase(str(filename))
-    deja = punaise_identique(filename, texte, valeurs)
     recalees = _punaises_recalees(filename, texte)
+    retirees = set(valeurs)
+    if etendue is None:
+        deja = punaise_identique(filename, texte, valeurs)
+    else:
+        # Avec une etendue, une punaise QUELCONQUE dans ces lignes suffit a depunaiser : le clic
+        # ne repunaise plus la mesure neuve quand elle differe de la punaisee (utilisateur,
+        # 31/10/2026 : « un premier clic sur une punaise de la décoche pas »).
+        premiere, derniere = etendue
+        dans_etendue = {cle for cle in recalees if premiere <= cle[1] <= derniere}
+        deja = bool(dans_etendue)
+        retirees.update(dans_etendue)
     # Dans les deux cas, l'ancienne punaise de ces lignes s'en va.
-    for cle in valeurs:
+    for cle in retirees:
         if cle in recalees:
             groupe, origine, _valeur = recalees[cle]
             groupe['lignes'].pop(origine, None)
@@ -1451,9 +1467,9 @@ class ProfileResultsManager(QObject):
     def punaise_identique(self, valeurs):
         return punaise_identique(self.filename, self.editor.toPlainText(), valeurs)
 
-    def basculer_punaise(self, valeurs):
+    def basculer_punaise(self, valeurs, etendue=None):
         if self.filename and valeurs:
-            basculer_punaise(self.filename, self.editor.toPlainText(), valeurs)
+            basculer_punaise(self.filename, self.editor.toPlainText(), valeurs, etendue)
 
     def a_des_resultats(self):
         """Vrai si une zone au moins a quelque chose a montrer pour ce fichier."""
@@ -1626,6 +1642,19 @@ class ProfileResultsPanel(Panel):
     # Cote de l'icone de marqueur, en pixels. Meme valeur que la marge des points d'arret du
     # debogueur, pour que les deux pastilles aient la meme taille a l'ecran.
     TAILLE_ICONE = 16
+    # Largeur de la case punaise (utilisateur, 31/10/2026 : « les punais doivent être plus
+    # discrettes prendre moin de largeur »). L'icone, elle, garde TAILLE_ICONE et deborde sur les
+    # marges vides du glyphe (« trop petites, il fallait surtout ne pas les remplir, diminuer les
+    # marges et les griser légèrement ») : cf. _dessiner_punaise.
+    TAILLE_PUNAISE = 10
+    # Contour de la punaise, en pixels de l'ecran : un fin trait de 1 px, 7 de large, 10 de haut
+    # (« trop agrandi les punaise et le trait de contour est trop epais », 31/10/2026 : le glyphe
+    # mdi.pin-outline agrandi epaississait son trait avec lui).
+    CONTOUR_PUNAISE = ((1, 0), (6, 0), (6, 1), (5, 1), (5, 4), (7, 6), (0, 6), (2, 4), (2, 1),
+                       (1, 1))
+    HAUTEUR_PUNAISE = 10
+    # Opacite du texte des mesures et des punaises : « légèrement grisé » (31/10/2026).
+    OPACITE_MESURES = 0.75
     # Marge de part et d'autre du texte de l'en-tete (utilisateur, 31/10/2026 : « il faut tout de
     # meme une petite marge » - PADDING seul collait le libelle au filet).
     MARGE_ENTETE = 6
@@ -1648,8 +1677,10 @@ class ProfileResultsPanel(Panel):
         self.source, self.natures = charger_choix_zone(rang)
         # Entree du menu decochee : la zone ne montre plus rien (cf. cacher).
         self.cachee = charger_zone_cachee(rang)
-        # (ligne, partie) dont l'unite est survolee : une punaise s'y dessine (cf. _cible_punaise).
+        # Ligne dont la case punaise est survolee : une punaise s'y dessine (cf. _cible_punaise).
         self._survol_punaise = None
+        # Ligne dont la punaise est enfoncee : la bascule se fait au RELACHEMENT, sur la meme case.
+        self._presse_punaise = None
         # Donnees de la zone, filtrees par source et natures (cf. rafraichir).
         self._lignes = {}
         self._operations = {}
@@ -2106,7 +2137,7 @@ class ProfileResultsPanel(Panel):
 
         # Le texte est en couleur de texte normale (et non thermique) : c'est le FOND de la case
         # qui porte la couleur de la ligne, le chiffre reste donc lisible a toute temperature.
-        couleur_texte = QColor(self.editor.palette().windowText().color())
+        couleur_texte = self._couleur_grisee()
         # Reference : meme couleur, attenuee - la mesure courante reste la plus lisible.
         if self.source == 'reference':
             couleur_texte.setAlphaF(0.55)
@@ -2120,7 +2151,7 @@ class ProfileResultsPanel(Panel):
         # l'ancien 'elif' apres le fond thermique ne les atteignait jamais).
         ligne_courante = self.results_manager.ligne_courante()
 
-        couleur_pleine = QColor(self.editor.palette().windowText().color())
+        couleur_pleine = self._couleur_grisee()
         for haut, numero, bloc in self.editor.visible_blocks:
             hauteur = self._hauteur_ligne(bloc)
             mesure = lignes.get(numero)
@@ -2212,10 +2243,9 @@ class ProfileResultsPanel(Panel):
                             self._colonnes(nom_mode)):
                         painter.drawText(x, haut, larg, hauteur,
                                          int(alin | Qt.AlignVCenter), texte)
-            if self._survol_punaise == numero:
-                self._dessiner_punaise(painter, haut, hauteur, numero)
-            elif self._a_punaiser(numero) and manager.est_punaisee(numero):
-                self._dessiner_punaise(painter, haut, hauteur, None)
+            if self._presse_punaise == numero or self._survol_punaise == numero or (
+                    self._a_punaiser(numero) and manager.est_punaisee(numero)):
+                self._dessiner_punaise(painter, haut, hauteur, self._presse_punaise == numero)
 
         # Fin trait de demarcation entre le code et la colonne, UNIQUEMENT quand il y a des temps
         # a afficher (demande de l'utilisateur : "pas par defaut").
@@ -2245,7 +2275,7 @@ class ProfileResultsPanel(Panel):
     # sur l'unite, une cible de la largeur d'un « s » qui cachait la valeur au survol.
     def _case_punaise(self):
         """Largeur de la case de la punaise, dans toute zone qui montre des valeurs."""
-        return self.TAILLE_ICONE + self.PADDING
+        return self.TAILLE_PUNAISE + self.PADDING
 
     def _x_bouton(self):
         """Bord gauche de la case du bouton (Σ, horloge, Σ de tete) : apres la case de la
@@ -2261,10 +2291,17 @@ class ProfileResultsPanel(Panel):
     def _cible_punaise(self, event):
         """Ligne dont la case de punaise est sous la souris, ou None."""
         x = int(event.position().x())
-        if not x <= self.PADDING + self.TAILLE_ICONE:
+        if not x <= self.PADDING + self.TAILLE_PUNAISE:
             return None
         numero = self.editor.get_linenumber_from_mouse_event(event)
         return numero if self._a_punaiser(numero) else None
+
+    def _etendue_punaise(self, numero):
+        """(premiere, derniere) lignes que depunaise le clic : la fonction entiere sur un `def`."""
+        mesure = self._lignes.get(numero)
+        if (mesure is not None and mesure.kind == 'def') or numero in self._fonctions:
+            return etendue_fonction(self.editor.toPlainText(), numero)
+        return numero, numero
 
     def _valeurs_punaise(self, numero):
         """{(nature, ligne): mesure} que punaise un clic dans la case : ce que la zone montre de la
@@ -2288,21 +2325,33 @@ class ProfileResultsPanel(Panel):
             valeurs[('fonctions', numero)] = self._fonctions[numero]
         return valeurs
 
-    def _dessiner_punaise(self, painter, haut, hauteur, survol):
-        """La punaise dans sa case. Survolee (`survol` = sa ligne) : pleine si le clic
-        depunaiserait, creuse sinon. Hors survol, sur une ligne punaisee : pleine, estompee."""
-        if survol is None:
-            pleine, opacite = True, 0.45
-        else:
-            pleine, opacite = self.results_manager.punaise_identique(
-                self._valeurs_punaise(survol)), 1.0
-        import qtawesome as qta
-        icone = qta.icon('mdi.pin' if pleine else 'mdi.pin-outline',
-                         color=self.editor.palette().windowText().color())
-        cote = min(hauteur, self.TAILLE_ICONE)
+    def _couleur_grisee(self):
+        """Couleur du texte des mesures, legerement grisee, que la punaise reprend
+        (utilisateur, 31/10/2026 : « comme le résultat des mesures, qui doit être légèrement
+        grisé »). Par transparence et non par melange avec le fond de l'editeur : le chiffre
+        reste ainsi sur le fond thermique de sa case."""
+        couleur = QColor(self.editor.palette().windowText().color())
+        couleur.setAlphaF(self.OPACITE_MESURES)
+        return couleur
+
+    def _dessiner_punaise(self, painter, haut, hauteur, presse):
+        """La punaise dans sa case, toujours creuse (utilisateur, 31/10/2026 : « il fallait
+        surtout ne pas les remplir »), grisee comme les mesures (_couleur_grisee) ; plus blanche
+        pendant l'appui seulement (« la couleur doit devenir plus blanche pendant le clic, pas
+        pendant le survol »)."""
+        couleur = (eclaircir(QColor(self.editor.palette().windowText().color()), 0.5) if presse
+                   else self._couleur_grisee())
+        # Dessinee a la main et non par une icone : un glyphe ne garde pas son trait fin a cette
+        # taille. Demi-pixel ajoute : le trait de 1 px tombe pile sur une colonne de l'ecran.
+        x = self.PADDING + (self.TAILLE_PUNAISE - 7) // 2 + 0.5
+        y = haut + (hauteur - self.HAUTEUR_PUNAISE) // 2 + 0.5
         painter.save()
-        painter.setOpacity(opacite)
-        icone.paint(painter, QRect(self.PADDING, haut + (hauteur - cote) // 2, cote, cote))
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setPen(couleur)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPolygon(QPolygonF([QPointF(x + px, y + py)
+                                       for px, py in self.CONTOUR_PUNAISE]))
+        painter.drawLine(QPointF(x + 3.5, y + 6), QPointF(x + 3.5, y + self.HAUTEUR_PUNAISE - 1))
         painter.restore()
 
     # ---- En-tete : le menu de la zone, sur la PREMIERE ligne visible
@@ -2390,6 +2439,9 @@ class ProfileResultsPanel(Panel):
             ima.icon('profiler').paint(painter, QRect(
                 cadre.left() + self._largeur_libelle(libelle) - cote,
                 (hauteur - cote) // 2, cote, cote))
+        # Le ▾ grise comme les mesures (utilisateur, 31/10/2026 : « et la flèche du menu aussi un
+        # peu grisée »).
+        painter.setPen(self._couleur_grisee())
         painter.drawText(cadre, int(Qt.AlignRight | Qt.AlignVCenter), '▾')
 
     def _zones(self):
@@ -2671,7 +2723,8 @@ class ProfileResultsPanel(Panel):
             return
         cible = self._cible_punaise(event)
         if cible is not None:
-            self.results_manager.basculer_punaise(self._valeurs_punaise(cible))
+            self._presse_punaise = cible
+            self.update()
             return
         lineno = self.editor.get_linenumber_from_mouse_event(event)
         if self._clic_sur_bouton_horloge(event, lineno):
@@ -2738,6 +2791,12 @@ class ProfileResultsPanel(Panel):
             self._redimensionne = False
             sauver_mode_compact(self._compact)
             sauver_horloges_seules(self._horloges)
+        presse, self._presse_punaise = self._presse_punaise, None
+        if presse is not None:
+            if self._cible_punaise(event) == presse:
+                self.results_manager.basculer_punaise(self._valeurs_punaise(presse),
+                                                      self._etendue_punaise(presse))
+            self.update()
 
     def leaveEvent(self, event):
         self.setCursor(Qt.ArrowCursor)
