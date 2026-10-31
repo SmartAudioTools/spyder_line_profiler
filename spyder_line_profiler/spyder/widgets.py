@@ -119,6 +119,10 @@ class SpyderLineProfilerWidgetActions:
     SaveData = 'save_data_action'
     ShowOutput = 'show_output_action'
     Stop = 'stop_action'
+    # SmartOS : mode « Σ » - lancer un comptage, epingler un comptage
+    Compter = 'compter_operations_action'
+    Epingler = 'epingler_comptage_action'
+    Desepingler = 'desepingler_comptage_action'
 
 
 class SpyderLineProfilerWidgetMainToolbarSections:
@@ -154,6 +158,9 @@ class SpyderLineProfilerWidget(PluginMainWidget):
 
     redirect_stdio = Signal(bool)
     sig_finished = Signal()
+    # SmartOS, mode « Σ » : le bouton du panneau demande au greffon de compter le fichier
+    # courant, par le meme chemin que le menu Execution (configuration d'execution du Run).
+    sig_compter_requested = Signal()
     # Signals
     sig_edit_goto_requested = Signal(str, int, str)
     """
@@ -217,7 +224,8 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             text=_("Profile by line"),
             tip=_("Run line profiler"),
             icon=self.create_icon('run'),
-            triggered=self.start,
+            # SmartOS : ce bouton chronometre toujours - le comptage a son propre bouton (Σ).
+            triggered=self._smartos_relancer_chronometrage,
         )
         self.stop_action = self.create_action(
             SpyderLineProfilerWidgetActions.Stop,
@@ -268,6 +276,32 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             icon=self.create_icon('editdelete'),
             triggered=self.clear_data,
         )
+        # SmartOS (demande de l'utilisateur du 30/10/2026, « un simple epinglage ») : figer un
+        # comptage d'operations pour le revoir a cote du suivant - typiquement le meme script
+        # pour deux tailles d'entree n. Libelles en francais directement (cf. plus bas).
+        import qtawesome as qta
+        from spyder.utils.icon_manager import ima
+        self.epingler_action = self.create_action(
+            SpyderLineProfilerWidgetActions.Epingler,
+            text="Épingler le comptage d'opérations",
+            tip="Garde ce comptage affiché à côté du prochain, pour les comparer",
+            icon=qta.icon('mdi.pin', color=ima.MAIN_FG_COLOR),
+            triggered=self._smartos_epingler,
+        )
+        self.compter_action = self.create_action(
+            SpyderLineProfilerWidgetActions.Compter,
+            text="Compter les opérations élémentaires",
+            tip="Compter les opérations élémentaires des fonctions marquées (Ctrl+Maj+F10)",
+            icon=qta.icon('mdi.sigma', color='#ff00ff'),
+            triggered=lambda: self.sig_compter_requested.emit(),
+        )
+        self.desepingler_action = self.create_action(
+            SpyderLineProfilerWidgetActions.Desepingler,
+            text="Retirer l'épingle",
+            tip="N'affiche plus le comptage épinglé",
+            icon=qta.icon('mdi.pin-off', color=ima.MAIN_FG_COLOR),
+            triggered=self._smartos_desepingler,
+        )
 
         self.set_running_state(False)
         self.start_action.setEnabled(False)
@@ -300,7 +334,7 @@ class SpyderLineProfilerWidget(PluginMainWidget):
                 item, menu=options_menu, section="smartos_lp_tree"
             )
         for item in [self.log_action, self.save_action, self.clear_action,
-                     self.browse_action]:
+                     self.epingler_action, self.desepingler_action, self.browse_action]:
             self.add_item_to_menu(
                 item, menu=options_menu, section="smartos_lp_data"
             )
@@ -310,7 +344,7 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         # (parcourir) est dans le menu burger : on profile presque toujours le fichier courant, et
         # la liste deroulante garde de toute facon l'historique.
         toolbar = self.get_main_toolbar()
-        for item in [self.filecombo, self.start_action,
+        for item in [self.filecombo, self.start_action, self.compter_action,
                      self.stop_action]:
             self.add_item_to_toolbar(
                 item,
@@ -335,7 +369,8 @@ class SpyderLineProfilerWidget(PluginMainWidget):
 
         if not is_lineprofiler_installed():
             for widget in (self.datatree, self.filecombo, self.log_action,
-                           self.start_action, self.stop_action, self.browse_action,
+                           self.start_action, self.compter_action, self.stop_action,
+                           self.browse_action,
                            self.collapse_action, self.expand_action):
                 widget.setDisabled(True)
             text = _(
@@ -346,8 +381,12 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         else:
             pass
 
-    def analyze(self, filename=None, wdir=None, args=None, use_colors=True):
+    def analyze(self, filename=None, wdir=None, args=None, use_colors=True, mode='temps'):
         self.use_colors = use_colors
+        # Mode « Σ » (ajout SmartOS, demande de l'utilisateur du 30/10/2026) : 'operations' compte
+        # les operations elementaires (cx_launcher.py) au lieu de chronometrer. Retenu pour start(),
+        # que le bouton de relance du panneau appelle seul.
+        self._smartos_mode_mesure = mode
         if not is_lineprofiler_installed():
             return
         self.kill_if_running()
@@ -441,7 +480,9 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             proc_env.insert('PYTHONPATH', os.pathsep.join(self.pythonpath))
         self.process.setProcessEnvironment(proc_env)
 
-        self.clear_data()
+        _smartos_mode = getattr(self, '_smartos_mode_mesure', 'temps')
+        # N'efface que la mesure relancee : l'autre reste affichee tant que le code ne change pas.
+        self.clear_data(_smartos_mode)
         self.error_output = ''
 
         # Use UTF-8 mode so that profiler writes its output to DATAPATH using
@@ -462,9 +503,23 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         _smartos_lp_launcher = os.path.join(os.path.dirname(__file__), 'lp_launcher.py')
         _smartos_lp_config = get_conf_path('lineprofiler_targets.json')
         ecrire_config_lanceur(filename, _smartos_lp_config, log=logger.debug)
-        p_args = ['-X', 'utf8', _smartos_lp_launcher,
-                  '--lprof', self.DATAPATH, '--prof', self._smartos_prof_path,
-                  '--config', _smartos_lp_config]
+        if _smartos_mode == 'operations':
+            # Comptage : meme configuration des cibles, autre lanceur, aucun .prof (cProfile
+            # mesurerait le programme ralenti par le comptage, donc rien d'utile).
+            from spyder_line_profiler.spyder.profile_results import operations_path
+            self._smartos_ops_path = operations_path()
+            # Le JSON du comptage precedent ne doit pas survivre a un lancement qui echoue avant
+            # d'ecrire (complexity_profiler absent, erreur de syntaxe) : show_data le relirait.
+            try:
+                os.remove(self._smartos_ops_path)
+            except OSError:
+                pass
+            p_args = ['-X', 'utf8', os.path.join(os.path.dirname(__file__), 'cx_launcher.py'),
+                      '--ops', self._smartos_ops_path, '--config', _smartos_lp_config]
+        else:
+            p_args = ['-X', 'utf8', _smartos_lp_launcher,
+                      '--lprof', self.DATAPATH, '--prof', self._smartos_prof_path,
+                      '--config', _smartos_lp_config]
         # Redirection Pyxel (ajout SmartOS, cf. patch_spyder_line_profiler_targets.py) :
         # si le script profile importe pyxel, son ecran doit apparaitre dans le panneau
         # Pyxel plutot que dans sa propre fenetre SDL - best-effort, sans consequence pour
@@ -508,8 +563,13 @@ class SpyderLineProfilerWidget(PluginMainWidget):
             QMessageBox.critical(self, _("Error"),
                                  _("Process failed to start"))
 
+    def _smartos_relancer_chronometrage(self):
+        self._smartos_mode_mesure = 'temps'
+        self.start()
+
     def set_running_state(self, state=True):
         self.start_action.setEnabled(not state)
+        self.compter_action.setEnabled(not state)
         self.stop_action.setEnabled(state)
 
     def read_output(self, error=False):
@@ -543,7 +603,11 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         if not self.output == 'aborted':
             elapsed = str(datetime.now() - self.started_time).split(".")[0]
             self.show_data(justanalyzed=True)
-            self.datelabel.setText(_(f'Profiling finished after {elapsed}'))
+            if getattr(self, '_smartos_mode_mesure', 'temps') == 'operations':
+                # Garder ce que le bandeau dit du comptage (modules non comptes, erreur).
+                self.datelabel.setText(self.datelabel.text() + ' (' + elapsed + ')')
+            else:
+                self.datelabel.setText(_(f'Profiling finished after {elapsed}'))
         self.show_errorlog()  # If errors occurred, show them.
         self.sig_finished.emit()
 
@@ -570,12 +634,15 @@ class SpyderLineProfilerWidget(PluginMainWidget):
     def _update_pythonpath(self, value):
         self.pythonpath = value
 
-    def clear_data(self):
-        self.datatree.clear()
+    def clear_data(self, kind=None):
+        # `kind` (ajout SmartOS) : 'temps' ou 'operations' au lancement d'une mesure, qui n'efface
+        # qu'elle ; None (bouton d'effacement) efface les deux.
+        if kind != 'operations':
+            self.datatree.clear()
         # Le bouton d'effacement du panneau vide aussi l'editeur (ajout SmartOS) : sans cela
         # les lignes resteraient colorees par un profilage que l'utilisateur vient d'effacer.
         from spyder_line_profiler.spyder.profile_results import clear as _smartos_clear_results
-        _smartos_clear_results()
+        _smartos_clear_results(kind)
         self.clear_action.setEnabled(False)
         self.log_action.setEnabled(False)
         self.save_action.setEnabled(False)
@@ -592,6 +659,10 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         self.kill_if_running()
         filename = str(self.filecombo.currentText())
         if not filename:
+            return
+
+        if justanalyzed and getattr(self, '_smartos_mode_mesure', 'temps') == 'operations':
+            self._smartos_show_operations()
             return
 
         self.datatree.load_data(self.DATAPATH)
@@ -637,6 +708,40 @@ class SpyderLineProfilerWidget(PluginMainWidget):
         date_text = text_style % time.strftime("%d %b %Y %H:%M",
                                                time.localtime())
         self.datelabel.setText(date_text)
+
+    def _smartos_show_operations(self):
+        """Fin d'un comptage (mode « Σ ») : publie les comptes vers les editeurs ouverts.
+
+        Ni arbre ni panneau Profileur : ils montrent des temps, et un comptage n'en produit pas.
+        Le bandeau dit ce que le compte n'a pas pu voir - fonctions marquees dans un module
+        importe (le moteur ne compte que le fichier lance), erreur du programme.
+        """
+        from spyder_line_profiler.spyder.profile_results import publish_operations
+        donnees = publish_operations(getattr(self, '_smartos_ops_path', None) or '')
+        if donnees is None:
+            self.datelabel.setText(_('Operation count did not complete (error)'))
+            return
+        texte = _('Operations counted: {}').format(time.strftime("%d %b %Y %H:%M",
+                                                                 time.localtime()))
+        if donnees.get('hors_script'):
+            noms = ', '.join(osp.basename(f) for f in donnees['hors_script'])
+            texte += ' - ' + _('not counted (imported modules): {}').format(noms)
+        if donnees.get('erreur'):
+            texte += ' - ' + donnees['erreur']
+        self.datelabel.setText(texte)
+
+    def _smartos_epingler(self):
+        """Epingle le comptage courant (cf. profile_results.epingler)."""
+        from spyder_line_profiler.spyder.profile_results import epingler
+        if epingler() is None:
+            self.datelabel.setText("Aucun comptage d'opérations à épingler : lancer d'abord Σ")
+        else:
+            self.datelabel.setText("Comptage épinglé : le prochain s'affichera à sa droite")
+
+    def _smartos_desepingler(self):
+        from spyder_line_profiler.spyder.profile_results import desepingler
+        desepingler()
+        self.datelabel.setText("Épingle retirée")
 
     def save_data(self):
         """Save data."""

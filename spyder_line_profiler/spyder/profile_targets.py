@@ -395,7 +395,7 @@ def attach_editor(codeeditor):
     codeeditor.profile_results_manager = resultats
     codeeditor.sig_filename_changed.connect(resultats.set_filename)
 
-    manager = ProfileTargetsManager(codeeditor, panel=resultats.panel)
+    manager = ProfileTargetsManager(codeeditor, panel=resultats.zone_marqueurs)
     codeeditor.profile_targets_manager = manager
     # ProfileTargetsManager.set_filename(str) a exactement la signature de ce signal : on le
     # branche directement, sans slot intermediaire. La methode liee est le meme objet a la

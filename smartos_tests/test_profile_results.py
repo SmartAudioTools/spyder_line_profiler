@@ -40,6 +40,26 @@ from spyder.plugins.editor.widgets.codeeditor import CodeEditor  # noqa: E402
 
 from spyder_line_profiler.spyder import profile_results as pr  # noqa: E402
 
+# Le menu d'en-tete est modal : hors ecran, il bloquerait la serie.
+_ouvrir_menu_reel = pr.ProfileResultsPanel._ouvrir_menu
+pr.ProfileResultsPanel._ouvrir_menu = lambda self, pos: None
+
+# Les choix des deux zones ne se lisent ni ne s'ecrivent dans une configuration. Chaque test part
+# de gauche = reference, droite = derniere mesure, et des DEUX natures par zone (le dessin les sait
+# cote a cote) ; les vrais defauts, une nature par zone, ont leur test.
+_charger_choix_zone = pr.charger_choix_zone
+pr.charger_choix_zone = lambda rang: (pr.SOURCES_ZONES[rang], pr.NATURES)
+pr.sauver_choix_zone = lambda rang, source, natures: None
+pr.charger_zone_cachee = lambda rang: False
+pr.sauver_zone_cachee = lambda rang, cachee: None
+# Ni l'etat de la colonne : un gestionnaire d'un test precedent, encore vivant, enregistrait
+# « compact » a chaque publication (_redeployer_si_replie), et les tests suivants ne partaient
+# plus de 'complet' - echecs intermittents, selon le ramasse-miettes.
+pr.sauver_mode_compact = lambda compact: None
+pr.sauver_horloges_seules = lambda horloges: None
+# Ni les punaises de l'utilisateur : chemin inexistant, l'ecriture echoue en silence.
+pr.punaises_path = lambda: '/nonexistent-smartos/pas-de-punaises.json'
+
 # Ces tests verifient la couche LINE PROFILER seule (echelle LINEAIRE d'origine, heat =
 # secondes / ligne la plus chere). Depuis l'ajout de la coloration cProfile, load_results lit
 # aussi un .prof (get_conf_path('lineprofiler_cprofile.prof')) et bascule alors en echelle LOG -
@@ -218,6 +238,26 @@ def test_le_degrade_part_de_la_couleur_de_fond_neutre():
     assert pr.couleur_thermique(0.25, fond).name() != fond.name()
 
 
+def test_le_fond_neutre_suit_l_eclaircissement_du_focus():
+    """Demande du 30/10/2026 : « le fond de la marge a droite doit suivre la couleur du fond de
+    l'editeur quand il change lors du focus » (patch SmartOS patch_spyder_focus_volet.py)."""
+    from spyder.utils import stylesheet
+    facteur = stylesheet.SMARTOS_ECLAIRCISSEMENT  # absent = Spyder sans le patch : echec voulu
+    with tempfile.TemporaryDirectory() as dossier:
+        editor, manager = nouvel_editeur(os.path.join(dossier, 'script.py'))
+        base = editor.palette().base().color()
+        editor.hasFocus = lambda: False
+        assert manager.couleur_de_fond_neutre().name() == base.name()
+        reposes = []
+        manager._apply_decorations = lambda: reposes.append(True)
+        editor.hasFocus = lambda: True
+        editor.focus_changed.emit()
+        assert manager.couleur_de_fond_neutre().name() == base.lighter(facteur).name()
+        # Les fonds des lignes de code (palier froid) sont reposes au changement de focus.
+        assert reposes
+        manager.detach()
+
+
 def test_le_fond_prend_la_couleur_thermique_de_la_ligne():
     froid = pr.ProfileResultsManager.couleur_de_fond(0.0)
     chaud = pr.ProfileResultsManager.couleur_de_fond(1.0)
@@ -285,8 +325,8 @@ def test_effacer_les_resultats_retire_les_fonds():
         QApplication.processEvents()
         assert not editor.decorations.get(pr.DECORATION_KEY, [])
         # La marge se retrecit a sa largeur minimale, mais reste cliquable.
-        assert manager.panel.sizeHint().width() == \
-            manager.panel.TAILLE_ICONE + 2 * manager.panel.PADDING
+        assert manager.zone_marqueurs.sizeHint().width() == \
+            manager.zone_marqueurs.TAILLE_ICONE + 2 * manager.zone_marqueurs.PADDING
 
 
 def test_une_mesure_au_dela_de_la_fin_du_fichier_est_ignoree():
@@ -426,12 +466,52 @@ def test_la_colonne_des_temps_est_collee_au_code():
         pr.publish(ecrire_resultats(dossier, source))
         manager.refresh()
 
-        droite = list(editor.panels.panels_for_zone(Panel.Position.RIGHT))
-        assert droite, "aucun panneau a droite"
-        colle = min(droite, key=lambda p: p.order_in_zone)
-        assert colle is manager.panel, (
-            f"un {type(colle).__name__} (rang {colle.order_in_zone}) s'est glisse entre le code et "
-            f"la colonne des temps (rang {manager.panel.order_in_zone})")
+        # Calques par-dessus le code depuis le 31/10/2026 (transparents sans resultat) : rien ne
+        # s'intercale, la zone 1 touche la zone 2, et la zone 2 le bord droit de la vue.
+        gauche, droite = manager.zones
+        flottants = editor.panels.panels_for_zone(Panel.Position.FLOATING)
+        assert gauche in flottants and droite in flottants, flottants
+        vue = editor.viewport().geometry()
+        assert droite.geometry().right() == vue.right(), (droite.geometry(), vue)
+        assert gauche.geometry().right() + 1 == droite.geometry().left(), (
+            gauche.geometry(), droite.geometry())
+
+
+def test_les_zones_laissent_voir_le_code_sur_les_lignes_sans_resultat():
+    """Sur une ligne sans resultat, la zone est transparente : on y voit et y clique le code.
+
+    Demande de l'utilisateur, 31/10/2026 : « sur les ligne sans aucune resultat, peut-on mettre
+    le fond de la zone d'affichage du profilage transparent pour laisser visible le code ? ».
+    Mesure par editor.childAt(), qui suit le masque comme le fait Qt pour la souris ; refaite
+    apres un defilement, le masque devant suivre les lignes. Avec les marges de droite d'avant,
+    la zone repondait sur toute sa hauteur.
+    """
+    from qtpy.QtCore import QPoint
+
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        texte = SOURCE + "y = 0\n" * 80
+        Path(source).write_text(texte)
+        pr.clear()
+        pr.publish(ecrire_resultats(dossier, source))
+        editor, manager = nouvel_editeur(source)
+        editor.set_text(texte)
+        manager.refresh()
+        QApplication.processEvents()
+        zone = manager.zones[1]
+        assert 3 in zone._lignes and 8 not in zone._lignes
+        x = zone.x() + zone.width() // 2
+
+        def sous(numero):
+            bloc = editor.document().findBlockByNumber(numero - 1)
+            cadre = editor.blockBoundingGeometry(bloc).translated(editor.contentOffset())
+            return editor.childAt(QPoint(x, editor.viewport().y() + int(cadre.center().y())))
+
+        for defilement in (0, 1):
+            editor.verticalScrollBar().setValue(defilement)
+            QApplication.processEvents()
+            assert sous(3) is zone, (defilement, sous(3))
+            assert sous(8) is editor.viewport(), (defilement, sous(8))
 
 
 def test_la_colonne_des_temps_revient_a_son_minimum_cliquable():
@@ -449,19 +529,221 @@ def test_la_colonne_des_temps_revient_a_son_minimum_cliquable():
 
         pr.clear()
         editor, manager = nouvel_editeur(source)
-        minimum = manager.panel.sizeHint().width()
-        assert minimum >= manager.panel.TAILLE_ICONE, \
+        # Sans historique, la reference reste vide : la zone montre la derniere mesure.
+        manager.zone_marqueurs.appliquer_choix('derniere', 'temps')
+        minimum = manager.zone_marqueurs.sizeHint().width()
+        assert minimum >= manager.zone_marqueurs.TAILLE_ICONE, \
             "la colonne n'est plus cliquable alors qu'aucun temps n'est affiche"
 
         pr.publish(ecrire_resultats(dossier, source))
         manager.refresh()
-        assert manager.panel.sizeHint().width() > minimum, \
+        assert manager.zone_marqueurs.sizeHint().width() > minimum, \
             "la colonne ne s'elargit pas alors qu'il y a des temps"
 
         pr.clear()
         manager.refresh()
-        assert manager.panel.sizeHint().width() == minimum, \
+        assert manager.zone_marqueurs.sizeHint().width() == minimum, \
             "la colonne ne revient pas a son minimum quand les temps disparaissent"
+
+
+def test_une_seule_nature_par_zone_temps_a_gauche_comptage_a_droite():
+    # Hors Spyder (pas de configuration lisible) : les defauts.
+    import sys
+    gardee = sys.modules.get('spyder.config.manager')
+    sys.modules['spyder.config.manager'] = None
+    try:
+        assert _charger_choix_zone(0) == ('derniere', ('temps',))
+        assert _charger_choix_zone(1) == ('derniere', ('operations',))
+    finally:
+        sys.modules['spyder.config.manager'] = gardee
+    # Le menu : quatre entrees, dans l'ordre demande par l'utilisateur.
+    assert [libelles[0] for libelles in pr.LIBELLES_ZONES.values()] == [
+        'Dernier comptage', 'Dernier chronométrage', 'Chronométrage de référence',
+        'Comptage de référence']
+    with tempfile.TemporaryDirectory() as d:
+        src = str(Path(d) / 'm.py')
+        Path(src).write_text(SOURCE)
+        pr.publish(ecrire_resultats(d, src))
+        _editor, manager = nouvel_editeur(src)
+        zone = manager.panel
+        # Etat complet : en compact, la case des boutons ne laisse parfois que le ▾.
+        zone._basculer_vers('complet')
+        zone.appliquer_choix('derniere', 'temps')
+        assert zone.natures == ('temps',)
+        assert zone._texte_entete().startswith(('Dernier chronométrage', 'Dern.')), \
+            zone._texte_entete()
+        # Abrege, la nature reste dite par son marqueur (« et par "Dernier ∑" ? »).
+        zone._largeur = zone._largeur_libelle('Dernier ' + pr.ICONE_HORLOGE + ' ▾') \
+            + 2 * zone.MARGE_ENTETE
+        assert zone._texte_entete() == 'Dernier ' + pr.ICONE_HORLOGE + ' ▾', zone._texte_entete()
+        # Choisir le comptage REMPLACE le chronometrage, il ne s'y ajoute pas.
+        zone.appliquer_choix('derniere', 'operations')
+        assert zone.natures == ('operations',)
+        assert zone._lignes == {}
+
+
+def test_le_vide_cache_une_zone_sans_filet_et_l_autre_menu_la_rouvre():
+    """Decocher l'entree cochee : la zone sans boutons tombe a largeur nulle (pas de bande etroite, qui laisserait deux
+    filets serres) ; celle des boutons ne garde que leur case. On la rouvre par le menu de
+    l'autre zone, ou ses entrees suivent un separateur. Jamais les deux cachees a la fois."""
+    from qtpy.QtWidgets import QMenu
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        _editor, manager = nouvel_editeur(source)
+        gauche, droite = manager.zones
+        gauche.appliquer_choix('derniere', 'temps')
+        assert gauche._largeur > 0
+        gauche.cacher()
+        assert gauche._largeur == 0 and gauche._lignes == {}
+        droite.cacher()
+        assert droite._largeur == droite.TAILLE_ICONE + 2 * droite.PADDING
+        # Les deux cachees (par l'API : le menu l'interdit) : la case des boutons garde son menu,
+        # seul moyen de les rouvrir.
+        assert droite._texte_entete()
+        droite.appliquer_choix('derniere', 'temps')
+        assert not droite.cachee and droite._lignes
+
+        def ouvrir(zone, cliquer=None):
+            """Ouvre le menu de `zone` ; `cliquer` choisit l'entree (texte, rang d'apparition)."""
+            vus = []
+
+            def executer(menu, *_a):
+                actions = menu.actions()
+                vus.append([(a.text(), a.isChecked(), a.isSeparator()) for a in actions])
+                if cliquer is None:
+                    return None
+                texte, rang = cliquer
+                action = [a for a in actions if a.text() == texte][rang]
+                action.toggle()  # ce que fait Qt au clic sur une entree cochable
+                return action
+            ancien_exec = QMenu.exec
+            QMenu.exec = executer
+            try:
+                _ouvrir_menu_reel(zone, None)
+            finally:
+                QMenu.exec = ancien_exec
+            return vus[0]
+
+        entrees = ouvrir(droite)
+        assert [e[2] for e in entrees].count(True) == 1, "un separateur entre les deux zones"
+        assert len(entrees) == 9 and '∅' not in [e[0] for e in entrees]
+        # Ma zone d'abord, avec sa coche ; puis la zone cachee, rien de coche.
+        assert entrees[1][:2] == ('Dernier chronométrage', True), "ma zone garde sa coche"
+        assert not any(e[1] for e in entrees[5:9]), "rien de coche dans la zone cachee"
+        # Decocher l'entree cochee de droite NE cache PAS : la gauche l'est deja.
+        ouvrir(droite, ('Dernier chronométrage', 0))
+        assert not droite.cachee
+        # Choisir une entree de la zone cachee la rouvre.
+        ouvrir(droite, ('Dernier chronométrage', 1))
+        assert not gauche.cachee and gauche._largeur > 0
+        # Les deux visibles : decocher l'entree cochee cache la zone.
+        ouvrir(gauche, ('Dernier chronométrage', 0))
+        assert gauche.cachee and gauche._largeur == 0
+
+
+def test_deux_zones_avec_chacune_son_menu_sur_la_premiere_ligne():
+    """Deux zones separees (gauche = reference, droite = derniere mesure), chacune avec son menu
+    peint sur la premiere ligne de l'editeur (demande de l'utilisateur, 31/10/2026). Le menu ne
+    capte pas la case du bouton de gauche : un `def` en ligne 1 reste marquable."""
+    from qtpy.QtCore import QEvent, QPointF, Qt
+    from qtpy.QtGui import QMouseEvent
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        editor, manager = nouvel_editeur(source)
+        gauche, droite = manager.zones
+        assert (gauche.source, droite.source) == ('reference', 'derniere')
+        # Les boutons Σ / horloge sont dans la zone de DROITE (demande du 31/10/2026).
+        assert droite is manager.zone_marqueurs is manager.panel
+        assert droite.porte_marqueurs() and not gauche.porte_marqueurs()
+        # Les deux sont placees par Spyder : sous un meme nom, la seconde ecrasait la premiere.
+        flottants = editor.panels.panels_for_zone(pr.Panel.Position.FLOATING)
+        assert gauche in flottants and droite in flottants, flottants
+        # Sans historique, la reference est vide : la zone de gauche ne garde que son ▾, pour
+        # qu'on puisse y choisir une autre source.
+        assert gauche._texte_entete() == '▾' and droite._texte_entete().endswith('▾')
+        from qtpy.QtGui import QFontMetrics
+        fleche = QFontMetrics(editor.font()).horizontalAdvance('▾') + 2 * gauche.MARGE_ENTETE
+        assert gauche._largeur == max(gauche.TAILLE_ICONE + 2 * gauche.PADDING, fleche)
+
+        def clic(zone, x, y):
+            return QMouseEvent(QEvent.MouseButtonPress, QPointF(x, y), QPointF(x, y),
+                               Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+
+        haut = droite._hauteur_entete()
+        fin = droite._largeur - 2
+        assert droite._sur_l_entete(clic(droite, fin, haut // 2))
+        assert not droite._sur_l_entete(clic(droite, fin, haut + 2)), "ligne 2 prise pour le menu"
+        # L'en-tete part du bord gauche, meme au-dessus du bouton du `def` de la ligne 1 : il
+        # ne se decale plus a droite de ce bouton (utilisateur, 31/10/2026).
+        droite.grab()
+        assert droite._sur_l_entete(clic(droite, 1, haut // 2))
+        gauche.appliquer_choix('derniere', 'temps')
+        assert gauche._texte_entete().endswith('▾')
+        assert gauche._sur_l_entete(clic(gauche, 2, haut // 2)), \
+            "sans boutons, l'en-tete commence au bord gauche de la zone"
+        # Une nature REMPLACE l'autre : en comptage, la zone n'a plus de temps.
+        droite.appliquer_choix('derniere', 'operations')
+        assert droite.natures == ('operations',) and not droite._lignes
+        droite.appliquer_choix('derniere', 'temps')
+        assert droite.natures == ('temps',) and droite._lignes
+        droite.grab()
+        gauche.grab()
+
+
+def test_un_clic_sur_l_unite_punaise_la_ligne_puis_la_depunaise():
+    """Demande de l'utilisateur (31/10/2026) : « afficher une punaise a la place de l'unite quand
+    on la survole, et punaiser avec un simple clic gauche, puis depunaiser de la meme facon ». La
+    mesure punaisee devient la reference de SA ligne ; sur un `def`, de toute la fonction."""
+    from qtpy.QtCore import QPoint, Qt
+    from qtpy.QtTest import QTest
+    pr._PUNAISES = {}
+    try:
+        with tempfile.TemporaryDirectory() as dossier:
+            source = str(Path(dossier) / "m.py")
+            Path(source).write_text(SOURCE)
+            pr.publish(ecrire_resultats(dossier, source))
+            editor, manager = nouvel_editeur(source)
+            gauche, droite = manager.zones
+            numero = next(n for n, m in droite._lignes.items() if m.kind != 'def')
+            assert numero not in gauche._lignes, "reference deja remplie sans historique"
+            unites = dict((p, (g, d)) for p, g, d in droite._unites(numero))
+            assert 'temps' in unites, droite._unites(numero)
+            g, d = unites['temps']
+            y = editor.blockBoundingGeometry(editor.document().findBlockByNumber(numero - 1)) \
+                .translated(editor.contentOffset()).center().y()
+            position = QPoint((g + d) // 2, int(y))
+
+            # QTest.mouseMove ne livre pas de mouseMoveEvent hors ecran : appel direct.
+            from qtpy.QtCore import QEvent, QPointF
+            from qtpy.QtGui import QMouseEvent
+            droite.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(position),
+                                              QPointF(droite.mapToGlobal(position)),
+                                              Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+            assert droite._survol_punaise == (numero, 'temps'), droite._survol_punaise
+            droite.grab()                               # la punaise dessinee a la place de l'unite
+            QTest.mouseClick(droite, Qt.LeftButton, pos=position)
+            QApplication.processEvents()
+            assert gauche._lignes[numero].seconds == droite._lignes[numero].seconds, \
+                "la mesure punaisee n'est pas devenue la reference de sa ligne"
+            assert manager.est_punaisee(numero)
+            assert manager.punaise_identique({('temps', numero): droite._lignes[numero]})
+            # Le code change ailleurs : la punaise suit sa ligne.
+            editor.set_text("# en plus\n" + SOURCE)
+            manager.refresh()
+            assert manager.est_punaisee(numero + 1) and not manager.est_punaisee(numero)
+            editor.set_text(SOURCE)
+            manager.refresh()
+            # Meme geste, meme endroit : depunaise.
+            QTest.mouseClick(droite, Qt.LeftButton, pos=position)
+            QApplication.processEvents()
+            assert numero not in gauche._lignes and not manager.est_punaisee(numero)
+            assert pr._PUNAISES == {}, pr._PUNAISES
+    finally:
+        pr._PUNAISES = {}
 
 
 # =============================================================================
@@ -480,7 +762,7 @@ def test_la_marge_reste_cliquable_sur_un_fichier_jamais_profile():
         source = str(Path(dossier) / "jamais_profile.py")
         Path(source).write_text(SOURCE)
         _editor, manager = nouvel_editeur(source)
-        assert manager.panel.sizeHint().width() >= manager.panel.TAILLE_ICONE, \
+        assert manager.zone_marqueurs.sizeHint().width() >= manager.zone_marqueurs.TAILLE_ICONE, \
             "sans zone cliquable, impossible de poser le premier marqueur"
 
 
@@ -776,19 +1058,27 @@ def test_le_trait_de_demarcation_fait_toujours_une_colonne_physique():
             editor.render(image)
 
             bord = panel.mapTo(editor, QPoint(0, 0)).x() * dpr
-            y = int(200 * dpr)
-            peintes = []
-            for colonne in range(int(bord) - 2, int(bord) + 4):
-                if not (0 <= colonne < image.width()):
-                    continue
-                pixel = image.pixelColor(colonne, y)
-                if max(abs(a - b) for a, b in
-                       zip((pixel.red(), pixel.green(), pixel.blue()), fond_rvb)):
-                    peintes.append(colonne)
-            assert len(peintes) == 1, (
-                f"editeur large de {largeur} px (bord du panneau a {bord:.1f} px physiques) : "
-                f"{len(peintes)} colonne(s) peinte(s) au lieu d'une seule -> "
-                + ("trait invisible" if not peintes else f"colonnes {peintes}"))
+            # Au milieu d'une ligne MESUREE : sur les autres, la zone laisse voir le code et le
+            # filet n'est pas dessine (calque transparent, 31/10/2026).
+            # Sur une ligne MESUREE et sous le texte : le filet court sur TOUTE la hauteur, meme
+            # la ou la zone laisse voir le code (« la ligne de demarcation n'est plus sur tout
+            # le script », 31/10/2026).
+            bloc = editor.document().findBlockByNumber(min(panel._lignes) - 1)
+            cadre = editor.blockBoundingGeometry(bloc).translated(editor.contentOffset())
+            for y in (int((panel.mapTo(editor, QPoint(0, 0)).y() + cadre.center().y()) * dpr),
+                      int(350 * dpr)):
+                peintes = []
+                for colonne in range(int(bord) - 2, int(bord) + 4):
+                    if not (0 <= colonne < image.width()):
+                        continue
+                    pixel = image.pixelColor(colonne, y)
+                    if max(abs(a - b) for a, b in
+                           zip((pixel.red(), pixel.green(), pixel.blue()), fond_rvb)):
+                        peintes.append(colonne)
+                assert len(peintes) == 1, (
+                    f"y={y}, editeur large de {largeur} px (bord a {bord:.1f} px physiques) : "
+                    f"{len(peintes)} colonne(s) peinte(s) au lieu d'une seule -> "
+                    + ("trait invisible" if not peintes else f"colonnes {peintes}"))
 
 
 def _mesure_def(cumtime=9.5e-5, ncalls=3):
@@ -1044,7 +1334,8 @@ def test_le_repli_sur_les_horloges_reduit_la_colonne_a_une_icone():
         Path(source).write_text(SOURCE)
         pr.publish(ecrire_resultats(dossier, source))
         _editor, manager = nouvel_editeur(source)
-        panel = manager.panel
+        # La zone des marqueurs garde ses horloges ; celle des resultats disparait.
+        panel = manager.zone_marqueurs
 
         panel._basculer_vers('total')
         largeur_compacte = panel._largeur
@@ -1054,6 +1345,7 @@ def test_le_repli_sur_les_horloges_reduit_la_colonne_a_une_icone():
         assert panel._largeur == attendue, f"{panel._largeur} au lieu de {attendue}"
         assert panel._largeur <= largeur_compacte, \
             "le repli sur les horloges n'est pas plus etroit que l'etat compact"
+        assert manager.zones[0]._largeur == 0, "la zone des resultats ne se replie pas"
 
 
 def test_le_glissement_choisit_l_etat_le_plus_proche_des_trois():
@@ -1123,6 +1415,50 @@ def test_un_nouveau_profilage_sort_du_repli_sur_les_horloges():
             "la coloration des lignes n'est pas revenue avec le redeploiement"
 
 
+def test_un_nouveau_profilage_redeploie_meme_si_la_zone_des_marqueurs_est_vide():
+    """L'etat replie est PARTAGE par les deux zones : le redeploiement ne doit pas dependre de la
+    seule zone des marqueurs. Celle-ci reglee sur les comptages, sans aucun comptage, vaut 'vide' ;
+    l'autre, repliee, restait alors invisible et les lignes colorees (relecture du 31/10/2026)."""
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        editor, manager = nouvel_editeur(source)
+        gauche = manager.zones[0]
+        gauche.appliquer_choix('derniere', 'temps')
+        manager.zone_marqueurs.appliquer_choix('derniere', 'operations')
+        assert manager.zone_marqueurs._mode == 'vide'
+
+        gauche._basculer_vers('horloges')
+        assert gauche._mode == 'horloges'
+        assert not editor.decorations.get(pr.DECORATION_KEY, []), \
+            "la coloration reste alors que la zone des temps est repliee"
+
+        pr.publish(ecrire_resultats(dossier, source))
+
+        assert gauche._mode == 'total', f"reste en {gauche._mode} au lieu de se redeployer"
+
+
+def test_la_zone_des_marqueurs_vide_garde_son_menu_si_l_autre_est_cachee():
+    """Zone de gauche cachee, zone des marqueurs sans rien a montrer (ses comptages, aucun
+    comptage) : sans en-tete, plus aucun menu ne rouvrait la zone de gauche (relecture du
+    31/10/2026)."""
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        editor, manager = nouvel_editeur(source)
+        gauche, droite = manager.zones
+        droite.appliquer_choix('derniere', 'operations')
+        assert droite._mode == 'vide'
+        assert not droite._texte_entete(), "vide, la ligne 1 doit rester aux boutons"
+
+        gauche.cacher()
+
+        assert droite._texte_entete(), "plus aucun menu pour rouvrir la zone de gauche"
+        assert droite.width() > 0
+
+
 def test_un_nouveau_profilage_ne_touche_pas_un_etat_deja_deploye():
     """« On complète si on était déjà sur la vue complète » : l'etat choisi est respecte.
 
@@ -1179,6 +1515,52 @@ def main():
 
     print(f"\n{len(tests) - len(echecs)}/{len(tests)} tests passent")
     return 1 if echecs else 0
+
+
+def test_le_marqueur_suit_les_boutons_visibles_puis_la_derniere_mesure_lancee():
+    """Decision du 30/10/2026 : dernier lancement, sinon horloge si son bouton est visible,
+    sinon Σ si le sien l'est, sinon horloge."""
+    ancien = pr._LANCEE
+    try:
+        pr._LANCEE = None
+        assert pr.mode_du_marqueur((True, True)) == 'temps'
+        assert pr.mode_du_marqueur((True, False)) == 'temps'
+        assert pr.mode_du_marqueur((False, True)) == 'operations'
+        assert pr.mode_du_marqueur((False, False)) == 'temps'
+        pr.noter_lancement('operations')
+        assert pr.mode_du_marqueur((True, False)) == 'operations'
+        pr.noter_lancement('temps')
+        assert pr.mode_du_marqueur((False, True)) == 'temps'
+    finally:
+        pr._LANCEE = ancien
+
+
+def test_avant_la_fenetre_les_boutons_visibles_viennent_de_la_configuration():
+    """Au demarrage, les barres ne sont pas rendues : la configuration fait foi, sinon l'horloge
+    s'affichait avant d'etre remplacee par le Σ."""
+    import tempfile
+    import spyder.config.base as base
+    from spyder.config.manager import CONF
+    valeurs = {}
+    ancien_get, ancien_chemin = CONF.get, base.get_conf_path
+    CONF.get = lambda section, option, default=None: valeurs.get((section, option), default)
+    dossier = tempfile.mkdtemp()
+    base.get_conf_path = lambda filename=None: dossier
+    try:
+        assert pr.boutons_visibles_conf() == (True, True)
+        # spyder_window_controls pas encore enregistre : CONF.get rendrait la valeur par defaut
+        # (liste vide) ; c'est son fichier qui dit l'horloge masquee.
+        os.makedirs(os.path.join(dossier, 'plugins', 'window_controls'))
+        with open(os.path.join(dossier, 'plugins', 'window_controls', 'spyder.ini'), 'w') as f:
+            f.write("[window_controls]\nboutons_masques = ['%s']\n" % pr.CLE_BOUTON_HORLOGE)
+        assert pr.boutons_visibles_conf() == (False, True)
+        valeurs[('toolbar', 'last_visible_toolbars')] = ['file_toolbar']
+        assert pr.boutons_visibles_conf() == (False, False)
+        valeurs[('toolbar', 'last_visible_toolbars')] = ['profile_toolbar']
+        valeurs[('toolbar', 'toolbars_visible')] = False
+        assert pr.boutons_visibles_conf() == (False, False)
+    finally:
+        CONF.get, base.get_conf_path = ancien_get, ancien_chemin
 
 
 if __name__ == "__main__":

@@ -11,6 +11,9 @@
 Spyder Line Profiler Plugin.
 """
 
+# Standard library imports
+import time
+
 # Third-party imports
 import qtawesome as qta
 from qtpy.QtCore import Qt, Signal
@@ -22,6 +25,7 @@ from spyder.api.plugin_registration.decorators import (
     on_plugin_available, on_plugin_teardown)
 from spyder.plugins.mainmenu.api import ApplicationMenus, RunMenuSections
 from spyder.plugins.run.api import RunContext, RunExecutor, run_execute
+from spyder.plugins.toolbar.api import ApplicationToolbars
 from spyder.utils.icon_manager import ima
 
 # Local imports
@@ -43,7 +47,9 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
 
     NAME = "spyder_line_profiler"
     REQUIRES = [Plugins.Preferences, Plugins.Editor, Plugins.Run]
-    OPTIONAL = [Plugins.Profiler]  # SmartOS : profilage combine (point 2)
+    # SmartOS : profilage combine (point 2) ; menu Executer et barre d'outils du haut pour le
+    # mode « Σ ».
+    OPTIONAL = [Plugins.Profiler, Plugins.MainMenu, Plugins.Toolbar]
     TABIFY = [Plugins.Help]
     WIDGET_CLASS = SpyderLineProfilerWidget
     CONF_SECTION = CONF_SECTION
@@ -72,7 +78,10 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
 
     def on_initialize(self):
         self.widget = self.get_widget()
+        self._smartos_mode_suivant = None
+        self._smartos_action_operations = None
         self.widget.sig_finished.connect(self.sig_finished)
+        self.widget.sig_compter_requested.connect(self._smartos_compter)
 
         self.executor_configuration = [
             {
@@ -107,6 +116,37 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
                 },
                 shortcut_widget_context=Qt.ApplicationShortcut,
             )
+            self._smartos_creer_action_operations()
+
+    @on_plugin_available(plugin=Plugins.MainMenu)
+    def on_main_menu_available(self):
+        action = self._smartos_creer_action_operations()
+        if action is not None:
+            self.get_plugin(Plugins.MainMenu).add_item_to_application_menu(
+                action, ApplicationMenus.Run, RunMenuSections.RunInExecutors)
+
+    @on_plugin_teardown(plugin=Plugins.MainMenu)
+    def on_main_menu_teardown(self):
+        if self._smartos_action_operations is not None:
+            self.get_plugin(Plugins.MainMenu).remove_item_from_application_menu(
+                self.ACTION_OPERATIONS, menu_id=ApplicationMenus.Run)
+
+    # Le Σ a cote de « Profiler le fichier », dans la barre Profile du HAUT (demande de
+    # l'utilisateur, 30/10/2026). La barre est creee par le greffon Profiler : si elle n'existe
+    # pas encore, le Toolbar met l'action en file et l'y pose a sa creation.
+    @on_plugin_available(plugin=Plugins.Toolbar)
+    def on_toolbar_available(self):
+        action = self._smartos_creer_action_operations()
+        if action is not None:
+            self.get_plugin(Plugins.Toolbar).add_item_to_application_toolbar(
+                action, toolbar_id=ApplicationToolbars.Profile)
+
+    @on_plugin_teardown(plugin=Plugins.Toolbar)
+    def on_toolbar_teardown(self):
+        if self._smartos_action_operations is not None:
+            self.get_plugin(Plugins.Toolbar).remove_item_from_application_toolbar(
+                self.ACTION_OPERATIONS, toolbar_id=ApplicationToolbars.Profile)
+
     @on_plugin_available(plugin=Plugins.Editor)
     def on_editor_available(self):
         widget = self.get_widget()
@@ -165,7 +205,11 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
 
     @run_execute(context=RunContext.File)
     def run_file(self, input, conf):
-        self.switch_to_plugin()
+        # SmartOS : on ne ROUVRE pas un panneau que l'utilisateur a ferme (« il se reouvre a
+        # chaque fois », 30/10/2026) - les resultats sont dans la marge de l'editeur. Ouvert, il
+        # passe au premier plan comme avant.
+        if self.get_widget().toggle_view_action.isChecked():
+            self.switch_to_plugin()
 
         exec_params = conf['params']
         cwd_opts = exec_params['working_dir']
@@ -177,7 +221,14 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
         wdir = cwd_opts['path']
         args = params['args']
 
-        self.get_widget().analyze(filename, wdir=wdir, args=args)
+        # Mode « Σ » : demande posee par l'action, consommee ici (cf. _smartos_compter).
+        mode = 'temps'
+        demande, self._smartos_mode_suivant = self._smartos_mode_suivant, None
+        if demande is not None and time.monotonic() - demande < 2.0:
+            mode = 'operations'
+        from spyder_line_profiler.spyder.profile_results import noter_lancement
+        noter_lancement(mode)
+        self.get_widget().analyze(filename, wdir=wdir, args=args, mode=mode)
     # <<< SmartOS line profiler : debut du bloc injecte >>>
     # Marges du line profiler (marqueurs a gauche, temps a droite). Cf.
     # Commun/scripts/patch_spyder_line_profiler_targets.py.
@@ -200,4 +251,51 @@ class SpyderLineProfiler(SpyderDockablePlugin, RunExecutor):
         from spyder_line_profiler.spyder.profile_targets import (
             purger_marqueurs_des_fichiers_fermes)
         purger_marqueurs_des_fichiers_fermes()
+
+    # Mode « Σ » (demande du 30/10/2026) : compter les operations elementaires au lieu de
+    # chronometrer. Un second bouton, et non une option du premier : les deux mesures se lancent
+    # separement (le comptage ralentit le programme de x4 a x9, cf. cx_launcher). Le Run de
+    # Spyder n'a qu'un bouton par (contexte, executeur) : celui-ci passe donc par run_file du
+    # conteneur du Run, avec la meme configuration d'execution (dossier, arguments), et pose un
+    # drapeau date que run_file ci-dessus consomme.
+    ACTION_OPERATIONS = 'compter les operations elementaires'
+
+    def _smartos_creer_action_operations(self):
+        if not is_lineprofiler_installed():
+            return None
+        if self._smartos_action_operations is None:
+            self._smartos_action_operations = self.create_action(
+                self.ACTION_OPERATIONS,
+                text=_('Compter les opérations élémentaires'),
+                tip=_('Compter les opérations élémentaires des fonctions marquées'),
+                icon=qta.icon('mdi.sigma', color='#ff00ff'),
+                triggered=self._smartos_compter,
+                register_shortcut=True,
+                shortcut_context=self.NAME,
+                context=Qt.ApplicationShortcut,
+            )
+        return self._smartos_action_operations
+
+    def _smartos_boutons_visibles(self):
+        """(horloge, Σ) : le bouton « Profiler le fichier » et le Σ sont-ils visibles dans la
+        barre Profile ? Les masques un par un (Fenetre > Boutons des barres d'outils) se lisent
+        TOUJOURS dans la configuration, ecrite a chaque bascule : la barre, elle, les reprend a
+        chaque rendu, et entre deux rendus ses actions disaient l'horloge visible (« j'ai toujours
+        l'horloge au demarrage », l'utilisateur, 31/10/2026). Barre affichee : son etat vivant ;
+        pas encore affichee (demarrage) : la configuration."""
+        from spyder_line_profiler.spyder.profile_results import (
+            boutons_visibles_conf, boutons_masques_conf)
+        toolbar = self.get_plugin(Plugins.Toolbar, error=False)
+        try:
+            barre = toolbar.get_application_toolbar(ApplicationToolbars.Profile)
+        except Exception:
+            barre = None
+        if barre is None or not barre.isVisible():
+            return boutons_visibles_conf()
+        return boutons_masques_conf()
+
+    def _smartos_compter(self):
+        self._smartos_mode_suivant = time.monotonic()
+        run = self.get_plugin(Plugins.Run)
+        run.get_container().run_file(selected_executor=self.NAME)
     # <<< SmartOS line profiler : fin du bloc injecte >>>

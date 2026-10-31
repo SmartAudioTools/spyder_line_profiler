@@ -20,6 +20,7 @@ CONF_DEFAULTS = [
     ('shortcuts',
      {
        'spyder_line_profiler/Run file in spyder_line_profiler': 'Shift+F10',
+       'spyder_line_profiler/compter les operations elementaires': 'Ctrl+Shift+F10',
      }
     )
 ]
@@ -31,4 +32,4 @@ CONF_DEFAULTS = [
 #    or if you want to *rename* options, then you need to do a MAJOR update in
 #    version, e.g. from 1.0.0 to 2.0.0
 # 3. You don't need to touch this value if you're just adding a new option
-CONF_VERSION = '2.0.0'
+CONF_VERSION = '2.1.0'

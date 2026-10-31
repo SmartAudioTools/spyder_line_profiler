@@ -51,6 +51,17 @@ from spyder.plugins.editor.widgets.codeeditor import CodeEditor  # noqa: E402
 from spyder.plugins.editor.utils.editor import BlockUserData  # noqa: E402
 
 from spyder_line_profiler.spyder import profile_targets as pt  # noqa: E402
+from spyder_line_profiler.spyder import profile_results as pr  # noqa: E402
+
+# Le menu d'en-tete est modal : hors ecran, il bloquerait la serie.
+pr.ProfileResultsPanel._ouvrir_menu = lambda self, pos: None
+
+# Les choix de source des deux zones ne se lisent ni ne s'ecrivent dans une configuration :
+# chaque test part des defauts (gauche = reference, droite = derniere mesure).
+pr.charger_choix_zone = lambda rang: (pr.SOURCES_ZONES[rang], pr.NATURES)
+pr.sauver_choix_zone = lambda rang, source, natures: None
+# Ni les punaises de l'utilisateur : chemin inexistant, l'ecriture echoue en silence.
+pr.punaises_path = lambda: '/nonexistent-smartos/pas-de-punaises.json'
 
 
 SOURCE = '''def lente(n):
@@ -130,14 +141,14 @@ def clic_dans_la_marge(editor, manager, lineno):
     """Clique le BOUTON HORLOGE de la fonction contenant `lineno` (basculer son marqueur).
 
     Depuis que la colonne selectionne la ligne au clic hors du bouton (demande de
-    l'utilisateur), basculer un marqueur passe par un clic sur l'icone, calee a droite, sur la
+    l'utilisateur), basculer un marqueur passe par un clic sur l'icone, calee a gauche, sur la
     ligne du `def`. Le helper vise donc l'icone de def_line_for(lineno) - le `def` de la fonction
     contenant la ligne -, ou `lineno` lui-meme si la ligne n'appartient a aucune fonction (le
     clic ne posera alors rien, ce qui est justement ce que certains tests verifient).
     """
     panel = manager.panel
     ligne_def = manager.def_line_for(lineno) or lineno
-    x = panel.width() - panel.PADDING - panel.TAILLE_ICONE // 2
+    x = panel.PADDING + panel.TAILLE_ICONE // 2
     QTest.mouseClick(panel, Qt.LeftButton,
                      pos=QPoint(x, y_de_la_ligne(editor, ligne_def)))
     QApplication.processEvents()
@@ -201,11 +212,14 @@ def test_un_clic_hors_bouton_selectionne_la_ligne_et_place_le_curseur_a_la_fin()
 
     with tempfile.TemporaryDirectory() as dossier:
         chemin = str(Path(dossier) / "m.py")
-        Path(chemin).write_text(SOURCE)
+        # Le `def` descend en ligne 2 : la ligne 1 porte l'en-tete des menus de zone (decision de
+        # l'utilisateur, 31/10/2026), un clic hors bouton y ouvre le menu.
+        Path(chemin).write_text("import os\n" + SOURCE)
+        definition = DEF_LENTE + 1
         # Des resultats pour que la colonne soit large : sinon elle se reduit a une icone et il
         # n'y a pas de zone "hors bouton" ou cliquer.
-        stats = LineStats({(chemin, 1, 'lente'):
-                           [(2, 1, 400), (3, 300001, 40000000), (4, 300000, 60000000)]}, 1e-9)
+        stats = LineStats({(chemin, 2, 'lente'):
+                           [(3, 1, 400), (4, 300001, 40000000), (5, 300000, 60000000)]}, 1e-9)
         cible = Path(dossier) / "r"
         with open(cible, 'wb') as flux:
             pickle.dump(stats, flux)
@@ -215,16 +229,19 @@ def test_un_clic_hors_bouton_selectionne_la_ligne_et_place_le_curseur_a_la_fin()
 
         editor, manager = nouvel_editeur(filename=chemin)
         panel = manager.panel
-        x = panel.POIGNEE + 5  # hors de la poignee (gauche) ET de l'icone (droite)
-        assert x < panel._largeur - panel.PADDING - panel.TAILLE_ICONE, "pas assez large"
+        # Sans historique, la zone de reference est vide : on y montre la derniere mesure.
+        panel.appliquer_choix('derniere', 'temps')
+        # Hors de la poignee ET de l'icone, toutes deux au bord gauche de la colonne.
+        x = max(panel.POIGNEE, panel.PADDING + panel.TAILLE_ICONE) + 5
+        assert x < panel._largeur, "pas assez large"
 
-        # Ligne 1 = le `def` lui-meme : le cas explicitement cite par l'utilisateur.
+        # La ligne du `def` lui-meme : le cas explicitement cite par l'utilisateur.
         QTest.mouseClick(panel, Qt.LeftButton,
-                         pos=QPoint(x, y_de_la_ligne(editor, DEF_LENTE)))
+                         pos=QPoint(x, y_de_la_ligne(editor, definition)))
         QApplication.processEvents()
 
         assert manager.get_targets() == [], "un clic hors bouton ne doit rien basculer"
-        assert editor.textCursor().blockNumber() + 1 == DEF_LENTE
+        assert editor.textCursor().blockNumber() + 1 == definition
         assert editor.textCursor().atBlockEnd(), "le curseur doit etre a la fin de la ligne"
 
 
