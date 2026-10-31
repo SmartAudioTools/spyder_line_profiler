@@ -1655,6 +1655,11 @@ class ProfileResultsPanel(Panel):
     HAUTEUR_PUNAISE = 10
     # Opacite du texte des mesures et des punaises : « légèrement grisé » (31/10/2026).
     OPACITE_MESURES = 0.75
+    # Punaise enfoncee, a peine plus claire que punaisee (« il faut un moins grand écart de
+    # luminosité ») ; survolee sur une ligne non punaisee, plus foncee (« ajouter des punaises en
+    # gris plus foncé lors du survol avant de cliquer »), 31/10/2026.
+    OPACITE_APPUI = 0.9
+    OPACITE_SURVOL = 0.45
     # Marge de part et d'autre du texte de l'en-tete (utilisateur, 31/10/2026 : « il faut tout de
     # meme une petite marge » - PADDING seul collait le libelle au filet).
     MARGE_ENTETE = 6
@@ -1681,6 +1686,9 @@ class ProfileResultsPanel(Panel):
         self._survol_punaise = None
         # Ligne dont la punaise est enfoncee : la bascule se fait au RELACHEMENT, sur la meme case.
         self._presse_punaise = None
+        # Ligne qu'on vient de basculer : son survol ne dessine plus de punaise tant que la souris
+        # n'a pas change de ligne, sinon la punaise retiree restait visible sous le curseur.
+        self._survol_masque = None
         # Donnees de la zone, filtrees par source et natures (cf. rafraichir).
         self._lignes = {}
         self._operations = {}
@@ -2243,9 +2251,8 @@ class ProfileResultsPanel(Panel):
                             self._colonnes(nom_mode)):
                         painter.drawText(x, haut, larg, hauteur,
                                          int(alin | Qt.AlignVCenter), texte)
-            if self._presse_punaise == numero or self._survol_punaise == numero or (
-                    self._a_punaiser(numero) and manager.est_punaisee(numero)):
-                self._dessiner_punaise(painter, haut, hauteur, self._presse_punaise == numero)
+            if self._punaise_visible(numero):
+                self._dessiner_punaise(painter, haut, hauteur, self._opacite_punaise(numero))
 
         # Fin trait de demarcation entre le code et la colonne, UNIQUEMENT quand il y a des temps
         # a afficher (demande de l'utilisateur : "pas par defaut").
@@ -2287,6 +2294,22 @@ class ProfileResultsPanel(Panel):
         """Vrai si la ligne `numero` montre une valeur que sa case de punaise peut punaiser."""
         return self._mode in ('complet', 'total') and (
             numero in self._lignes or numero in self._operations or numero in self._fonctions)
+
+    def _punaise_visible(self, numero):
+        """Vrai si la case de la ligne `numero` montre une punaise (appui, survol ou punaisee)."""
+        if self._presse_punaise == numero:
+            return True
+        if self._survol_punaise == numero and numero != self._survol_masque:
+            return True
+        return self._a_punaiser(numero) and self.results_manager.est_punaisee(numero)
+
+    def _opacite_punaise(self, numero):
+        """Opacite de la punaise visible de la ligne `numero` : enfoncee, punaisee, ou survolee."""
+        if self._presse_punaise == numero:
+            return self.OPACITE_APPUI
+        if self._a_punaiser(numero) and self.results_manager.est_punaisee(numero):
+            return self.OPACITE_MESURES
+        return self.OPACITE_SURVOL
 
     def _cible_punaise(self, event):
         """Ligne dont la case de punaise est sous la souris, ou None."""
@@ -2334,13 +2357,12 @@ class ProfileResultsPanel(Panel):
         couleur.setAlphaF(self.OPACITE_MESURES)
         return couleur
 
-    def _dessiner_punaise(self, painter, haut, hauteur, presse):
+    def _dessiner_punaise(self, painter, haut, hauteur, opacite):
         """La punaise dans sa case, toujours creuse (utilisateur, 31/10/2026 : « il fallait
         surtout ne pas les remplir »), grisee comme les mesures (_couleur_grisee) ; plus blanche
-        pendant l'appui seulement (« la couleur doit devenir plus blanche pendant le clic, pas
-        pendant le survol »)."""
-        couleur = (eclaircir(QColor(self.editor.palette().windowText().color()), 0.5) if presse
-                   else self._couleur_grisee())
+        pendant l'appui, plus foncee au survol d'une ligne non punaisee (cf. _opacite_punaise)."""
+        couleur = QColor(self.editor.palette().windowText().color())
+        couleur.setAlphaF(opacite)
         # Dessinee a la main et non par une icone : un glyphe ne garde pas son trait fin a cette
         # taille. Demi-pixel ajoute : le trait de 1 px tombe pile sur une colonne de l'ecran.
         x = self.PADDING + (self.TAILLE_PUNAISE - 7) // 2 + 0.5
@@ -2766,6 +2788,7 @@ class ProfileResultsPanel(Panel):
         survol = None if self._sur_l_entete(event) else self._cible_punaise(event)
         if survol != self._survol_punaise:
             self._survol_punaise = survol
+            self._survol_masque = None
             self.update()
         if self._sur_la_poignee(event):
             self.setCursor(Qt.SplitHCursor)
@@ -2796,10 +2819,14 @@ class ProfileResultsPanel(Panel):
             if self._cible_punaise(event) == presse:
                 self.results_manager.basculer_punaise(self._valeurs_punaise(presse),
                                                       self._etendue_punaise(presse))
+                # Utilisateur, 31/10/2026 : « elles devraient disparaitre dès le relachement sans
+                # nécéciter un mouvement de la sourris ».
+                self._survol_masque = presse
             self.update()
 
     def leaveEvent(self, event):
         self.setCursor(Qt.ArrowCursor)
+        self._survol_masque = None
         if self._survol_punaise is not None:
             self._survol_punaise = None
             self.update()

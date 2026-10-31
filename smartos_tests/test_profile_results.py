@@ -774,16 +774,26 @@ def test_un_clic_dans_la_case_punaise_la_ligne_puis_la_depunaise():
             manager.refresh()
             assert manager.est_punaisee(numero)
             assert not manager.punaise_identique({('temps', numero): droite._lignes[numero]})
+            QTest.mouseMove(droite, position)
+            assert droite._survol_punaise == numero, droite._survol_punaise
             QTest.mousePress(droite, Qt.LeftButton, pos=position)
             # Pendant l'appui, et seulement la, la punaise s'eclaircit (« la couleur doit devenir
             # plus blanche pendant le clic, pas pendant le survol »).
             assert droite._presse_punaise == numero, droite._presse_punaise
+            assert droite._opacite_punaise(numero) == droite.OPACITE_APPUI
             droite.grab()
             QTest.mouseRelease(droite, Qt.LeftButton, pos=position)
             assert droite._presse_punaise is None
             QApplication.processEvents()
             assert numero not in gauche._lignes and not manager.est_punaisee(numero)
             assert pr._PUNAISES == {}, pr._PUNAISES
+            # La souris n'a pas bouge : la punaise disparait quand meme (« dès le relachement sans
+            # nécéciter un mouvement de la sourris »).
+            assert droite._survol_punaise == numero and not droite._punaise_visible(numero)
+            # Survol d'une ligne non punaisee : punaise plus foncee que punaisee (31/10/2026).
+            droite._survol_masque = None
+            assert droite._punaise_visible(numero)
+            assert droite._opacite_punaise(numero) == droite.OPACITE_SURVOL < droite.OPACITE_MESURES
     finally:
         pr._PUNAISES = {}
 
