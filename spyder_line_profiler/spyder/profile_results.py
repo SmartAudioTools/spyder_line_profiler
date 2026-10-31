@@ -354,13 +354,9 @@ _OPERATIONS = {}
 # change depuis (le JSON des operations, lui, porte sa propre source).
 _SOURCES_TEMPS = {}
 
-# Derniere mesure lancee, 'temps' ou 'operations' : c'est elle qui donne le fond des lignes
-# (decision de l'utilisateur : « le fond suit la derniere mesure lancee »).
-_DERNIERE = 'temps'
-
 # Mesure LANCEE en dernier dans cette session, 'temps' ou 'operations', None avant la premiere :
-# c'est elle qui choisit le marqueur de la marge (horloge ou Σ). Pas reprise du disque, a la
-# difference de _DERNIERE : sans lancement, le marqueur suit les boutons visibles (cf.
+# c'est elle qui choisit le marqueur de la marge (horloge ou Σ). Pas reprise du disque : sans
+# lancement, le marqueur suit les boutons visibles (cf.
 # mode_du_marqueur).
 _LANCEE = None
 
@@ -647,13 +643,12 @@ def _lire_operations(path):
 
 def publish_operations(path):
     """Publie les comptes d'operations du JSON `path` (mode « Σ ») et previent les editeurs."""
-    global _OPERATIONS, _DERNIERE
+    global _OPERATIONS
     # Les temps du disque d'abord : sinon ensure_loaded(), appele plus tard par un editeur, les
     # chargerait APRES le tri des perimes ci-dessous.
     ensure_loaded()
     donnees = _lire_operations(path)
     _OPERATIONS = {donnees['fichier']: donnees} if donnees else {}
-    _DERNIERE = 'operations'
     _retirer_perimes('operations')
     BUS.sig_results_changed.emit()
     BUS.sig_nouveaux_resultats.emit()
@@ -792,6 +787,27 @@ def _punaises_recalees(filename, texte):
         for ligne, cle in recalees.items():
             resultat[(groupe['nature'], ligne)] = (groupe, cle, groupe['lignes'][cle])
     return resultat
+
+
+def rechauffer(lignes, fonctions):
+    """Comptes de reference ({ligne: LigneComptee}, lignes puis `def`) avec une chaleur recalculee
+    sur la pire LIGNE de l'ensemble, comme profile_operations.lire le fait pour un comptage.
+
+    Une punaise est relue sans chaleur (0, cf. _vers_json), et 0 est exactement la couleur du fond
+    de l'editeur : la ligne etait peinte mais invisible (utilisateur, 31/10/2026 : « le comptage de
+    reference sur la colonne de droite ne colore rien »). Recalculer aussi l'epingle met epingle et
+    punaises sur une seule echelle. Ecarte : enregistrer la chaleur dans la punaise, qui resterait
+    sur l'echelle du comptage d'origine, pas sur celle de ce qui est montre."""
+    try:
+        from spyder_line_profiler.spyder.profile_operations import LigneComptee, chaleur
+    except ImportError:
+        return dict(lignes), dict(fonctions)
+    plus = max((ligne.operations for ligne in lignes.values()), default=0)
+
+    def rechauffee(ligne):
+        return LigneComptee(ligne.passages, ligne.operations, chaleur(ligne.operations, plus))
+    return ({n: rechauffee(v) for n, v in lignes.items()},
+            {n: rechauffee(v) for n, v in fonctions.items()})
 
 
 def punaises_for(filename, texte):
@@ -949,18 +965,12 @@ def _boutons_masques():
         return set()
 
 
-def derniere_mesure():
-    """'temps' ou 'operations' : la mesure qui donne le fond des lignes."""
-    return _DERNIERE
-
-
 def publish(path):
     """Recharge les resultats depuis `path`, archive le run, et previent les editeurs ouverts."""
-    global _RESULTS, _CHARGE, _DERNIERE
+    global _RESULTS, _CHARGE
     ensure_loaded()     # comptes du disque charges AVANT le tri des perimes (cf. publish_operations)
     _RESULTS = load_results(path)
     _noter_sources_temps(_RESULTS)
-    _DERNIERE = 'temps'
     _retirer_perimes('temps')
     # Enregistre ce profilage dans l'historique versionne (cf. _archive_run). Fait ici, au meme
     # instant que la lecture, pour archiver exactement ce qui est publie.
@@ -993,7 +1003,7 @@ def publish_cprofile(prof_buffer):
     Un run COMBINE (avec marqueurs) ne passe PAS par ici : il tourne en sous-process kernprof et
     publie ses DEUX couches (lignes + def) via widgets.py. Aucun conflit.
     """
-    global _RESULTS, _CHARGE, _DERNIERE
+    global _RESULTS, _CHARGE
     if not prof_buffer:
         return None
     ensure_loaded()
@@ -1006,7 +1016,6 @@ def publish_cprofile(prof_buffer):
     # load_results lit le .prof ecrit ci-dessus pour la couche def-heatmap.
     _RESULTS = load_results(os.devnull)
     _noter_sources_temps(_RESULTS)
-    _DERNIERE = 'temps'
     _retirer_perimes('temps')
     _CHARGE = True
     BUS.sig_results_changed.emit()
@@ -1039,7 +1048,7 @@ def ensure_loaded():
     ouvert) et non fait au demarrage du greffon, pour ne pas allonger le lancement de Spyder -
     qui fait deja l'objet d'un chantier a part.
     """
-    global _CHARGE, _DERNIERE, _EPINGLE
+    global _CHARGE, _EPINGLE
     if _CHARGE:
         return
     _CHARGE = True
@@ -1057,12 +1066,6 @@ def ensure_loaded():
     donnees = _lire_operations(chemin_ops)
     if donnees and donnees.get('source') == _source_disque(donnees['fichier']):
         _OPERATIONS[donnees['fichier']] = donnees
-        # Derniere mesure lancee = le fichier ecrit le plus recemment.
-        try:
-            plus_recent = osp.getmtime(chemin_ops) >= osp.getmtime(default_results_path())
-        except OSError:
-            plus_recent = True
-        _DERNIERE = 'operations' if plus_recent else 'temps'
 
 
 def results_for(filename):
@@ -1166,6 +1169,9 @@ class ProfileResultsManager(QObject):
         self.reference = {}
         # Punaises du fichier, {nature: {ligne: mesure}} (cf. punaises_for).
         self.punaises = {nature: {} for nature in NATURES_PUNAISE}
+        # Comptes de reference (epingle + punaises), chaleur recalculee (cf. rechauffer).
+        self.reference_operations = {}
+        self.reference_fonctions = {}
 
         # DEUX zones (demande du 31/10/2026) : zones[0] a gauche, cote code ; zones[1] a droite.
         # `panel` designe la zone de droite, la « derniere mesure » par defaut.
@@ -1352,21 +1358,29 @@ class ProfileResultsManager(QObject):
         return super().eventFilter(objet, event)
 
     def chaleur(self, ligne):
-        """Chaleur du fond de `ligne`, ou None : celle de la DERNIERE mesure lancee (decision de
-        l'utilisateur), l'autre si ce fichier n'a que celle-la. Lue par les fonds du code ET par
-        la colonne, pour qu'ils ne divergent jamais."""
-        if self.operations and (derniere_mesure() == 'operations' or not self.lignes):
-            mesure = self.operations.get(ligne) or self.fonctions.get(ligne)
-        else:
-            mesure = self.lignes.get(ligne)
+        """Chaleur du fond de `ligne`, ou None. Lue par les fonds du code ET par les zones, pour
+        qu'ils ne divergent jamais."""
+        mesure = self._mesures_du_fond().get(ligne)
         return None if mesure is None else mesure.heat
 
     def lignes_colorees(self):
         """Numeros des lignes qui recoivent un fond (cf. chaleur)."""
-        if self.operations and (derniere_mesure() == 'operations' or not self.lignes):
+        return self._mesures_du_fond().keys()
+
+    def _mesures_du_fond(self):
+        """{ligne: mesure} qui donne le fond : exactement ce que montre la zone de DROITE, rien si
+        elle est cachee ou vide (utilisateur, 31/10/2026 : « on ne devrait colorer que les lignes
+        ayant des valeurs dans la colonne de droite », « suit toujours ce qu'il y a dans la colonne
+        de droite » ; ecarte : la derniere mesure lancee, qui colorait des lignes sans chiffre en
+        face, et le repli sur la zone de gauche quand la droite n'a rien)."""
+        zone = getattr(self, 'zone_marqueurs', None)
+        if zone is None or zone.cachee:
+            return {}
+        lignes, operations, fonctions = self.donnees(zone.source)
+        if zone.natures[0] == 'operations':
             # Les lignes de `def` (totaux des fonctions) aussi, comme en mode horloge.
-            return self.operations.keys() | self.fonctions.keys()
-        return self.lignes.keys()
+            return {**fonctions, **operations}
+        return lignes
 
     def _redeployer_si_replie(self):
         """Un nouveau profilage sort la colonne du repli sur les horloges - et rien de plus.
@@ -1412,6 +1426,8 @@ class ProfileResultsManager(QObject):
         self.epingle = epingle_for(self.filename, texte)
         self.reference = reference_temps_for(self.filename, texte)
         self.punaises = punaises_for(self.filename, texte)
+        self.reference_operations, self.reference_fonctions = rechauffer(
+            {**self.epingle, **self.punaises['operations']}, self.punaises['fonctions'])
         self._poser_marges()
         self._apply_decorations()
         self.rafraichir_zones()
@@ -1425,9 +1441,8 @@ class ProfileResultsManager(QObject):
         comptages est l'epingle ; celle des temps, le plus ancien run de chaque fonction."""
         if source == 'reference':
             # Les punaises passent par-dessus la reference par defaut, ligne par ligne.
-            punaises = self.punaises
-            return ({**self.reference, **punaises['temps']},
-                    {**self.epingle, **punaises['operations']}, dict(punaises['fonctions']))
+            return ({**self.reference, **self.punaises['temps']},
+                    self.reference_operations, self.reference_fonctions)
         return self.lignes, self.operations, self.fonctions
 
     def est_punaisee(self, numero):
@@ -1814,8 +1829,8 @@ class ProfileResultsPanel(Panel):
         cols = self._cols_total
         if not cols:
             return icone
-        return max(sum(cols) + self.ECART_COLONNES * (len(cols) - 1) + 2 * self.PADDING, icone,
-                   self._entete_minimal('total'))
+        return max(sum(cols) + self.ECART_COLONNES * (len(cols) - 1) + 2 * self.PADDING
+                   + self._case_punaise(), icone, self._entete_minimal('total'))
 
     def _entete_minimal(self, mode):
         """Largeur du plus court en-tete admis : le ▾ seul dans une zone sans resultats, l'abrege
@@ -1830,7 +1845,7 @@ class ProfileResultsPanel(Panel):
         if not self._cols or not any(self._cols):
             return 0
         return (sum(self._cols) + self.ECART_COLONNES * (len(self._cols) - 1)
-                + 2 * self.PADDING)
+                + 2 * self.PADDING + self._case_punaise())
 
     def _texte_def(self, mesure, compte=None):
         """Texte affiche a droite d'une ligne de `def`, SANS le Σ (dessine a part, en gras).
@@ -1878,8 +1893,10 @@ class ProfileResultsPanel(Panel):
                 pire = max(pire, metrics.horizontalAdvance(texte))
         if not pire:
             return 0
-        # Case de gauche : le bouton dans la zone des marqueurs, le Σ de tete dans l'autre.
-        return int(pire + self.TAILLE_ICONE + self.PADDING + 2 * self.PADDING)
+        # Cases de gauche : la punaise, puis le bouton dans la zone des marqueurs, le Σ de tete
+        # dans l'autre.
+        return int(pire + self.TAILLE_ICONE + self.PADDING + 2 * self.PADDING
+                   + self._case_punaise())
 
     def porte_marqueurs(self):
         """Vrai pour la zone de droite, qui loge les boutons Σ / horloge des `def`."""
@@ -1967,10 +1984,8 @@ class ProfileResultsPanel(Panel):
         if (self._lignes or self._fonctions) and mode != 'horloges':
             largeur = max(largeur, self._largeur_defs(metrics))
         # L'en-tete le plus court doit tenir, meme apres la case d'un bouton (cf. _entete_minimal) ;
-        # au-dela, le libelle se contente de la place des resultats (cf. _texte_entete). Meme
-        # condition que _texte_entete, qui renvoie '' sinon.
-        a_un_entete = not (mode == 'horloges' or (mode == 'vide' and self.porte_marqueurs()))
-        if largeur and a_un_entete:
+        # au-dela, le libelle se contente de la place des resultats (cf. _texte_entete).
+        if largeur and self._a_un_entete():
             largeur = max(largeur, self._entete_minimal(mode))
         return largeur
 
@@ -2059,7 +2074,7 @@ class ProfileResultsPanel(Panel):
             return self._largeur
         cibles = self.targets_manager
         if self.porte_marqueurs() and cibles is not None and cibles.def_line_for(numero) == numero:
-            return min(self._largeur, self._case_entete())
+            return min(self._largeur, self._x_bouton() + self.TAILLE_ICONE)
         return 0
 
     def paintEvent(self, event):
@@ -2173,7 +2188,7 @@ class ProfileResultsPanel(Panel):
                     police_gras = QFont(police)
                     police_gras.setBold(True)
                     painter.setFont(police_gras)
-                    painter.drawText(QRect(self.PADDING, haut, self.TAILLE_ICONE, hauteur),
+                    painter.drawText(QRect(self._x_bouton(), haut, self.TAILLE_ICONE, hauteur),
                                      int(Qt.AlignCenter), 'Σ')
                     painter.setFont(police)
             elif marque:
@@ -2197,10 +2212,10 @@ class ProfileResultsPanel(Panel):
                             self._colonnes(nom_mode)):
                         painter.drawText(x, haut, larg, hauteur,
                                          int(alin | Qt.AlignVCenter), texte)
-            if not horloges_seules and self._survol_punaise \
-                    and self._survol_punaise[0] == numero:
-                self._dessiner_punaise(painter, haut, hauteur,
-                                       fond_ligne if fond_ligne is not None else fond)
+            if self._survol_punaise == numero:
+                self._dessiner_punaise(painter, haut, hauteur, numero)
+            elif self._a_punaiser(numero) and manager.est_punaisee(numero):
+                self._dessiner_punaise(painter, haut, hauteur, None)
 
         # Fin trait de demarcation entre le code et la colonne, UNIQUEMENT quand il y a des temps
         # a afficher (demande de l'utilisateur : "pas par defaut").
@@ -2223,57 +2238,45 @@ class ProfileResultsPanel(Panel):
             self._dessiner_demarcation(painter, event.rect())
         self._dessiner_entete(painter, fond)
 
-    # ---- Punaise : a la place de l'unite survolee, un clic punaise / depunaise
+    # ---- Punaise : sa case a GAUCHE de la zone, le bouton Σ juste apres
     # ------------------------------------------------------------------------
-    def _unites(self, numero):
-        """[(partie, gauche, droite)] des unites de la ligne `numero` : la fin de la cellule
-        TOTALE de chaque partie ('temps', 'operations'), ou de la formule d'un `def` ('def')."""
-        mode = self._mode
-        if mode not in ('complet', 'total'):
-            return []
-        metrics = QFontMetrics(self.editor.font())
-        mesure = self._lignes.get(numero)
-        fonction = self._fonctions.get(numero)
-        if (mesure is not None and mesure.kind == 'def') or fonction is not None:
-            formule = self._texte_def(mesure, fonction)
-            if ' ' not in formule:
-                return []
-            droite = self._largeur - self.PADDING
-            unite = formule.rsplit(' ', 1)[1]
-            return [('def', droite - metrics.horizontalAdvance(unite), droite)]
-        cols = self._cols if mode == 'complet' else self._cols_total
-        if not cols:
-            return []
-        xs = self._x_colonnes(cols)
-        colonnes = self._colonnes(mode)
-        unites = []
-        for i, texte in enumerate(self._cellules(numero, mode)):
-            partie = colonnes[i][0]
-            derniere = i + 1 == len(colonnes) or colonnes[i + 1][0] != partie
-            if partie is None or not derniere or ' ' not in texte:
-                continue
-            droite = xs[i] + cols[i]
-            unite = texte.rsplit(' ', 1)[1]
-            unites.append((partie, droite - metrics.horizontalAdvance(unite), droite))
-        return unites
+    # Sur l'unite jusqu'au 31/10/2026 ; l'utilisateur : « tu décale le bouton somme à droite, pour
+    # pouvoir ajouter le bouton de punaise à gauche plutot que sur l'unité ». Ecarte : la garder
+    # sur l'unite, une cible de la largeur d'un « s » qui cachait la valeur au survol.
+    def _case_punaise(self):
+        """Largeur de la case de la punaise, dans toute zone qui montre des valeurs."""
+        return self.TAILLE_ICONE + self.PADDING
+
+    def _x_bouton(self):
+        """Bord gauche de la case du bouton (Σ, horloge, Σ de tete) : apres la case de la
+        punaise quand la zone montre des valeurs, au bord sinon (rien a punaiser)."""
+        decale = self._mode in ('complet', 'total')
+        return self.PADDING + (self._case_punaise() if decale else 0)
+
+    def _a_punaiser(self, numero):
+        """Vrai si la ligne `numero` montre une valeur que sa case de punaise peut punaiser."""
+        return self._mode in ('complet', 'total') and (
+            numero in self._lignes or numero in self._operations or numero in self._fonctions)
 
     def _cible_punaise(self, event):
-        """(ligne, partie, gauche, droite) de l'unite sous la souris, ou None."""
+        """Ligne dont la case de punaise est sous la souris, ou None."""
         x = int(event.position().x())
+        if not x <= self.PADDING + self.TAILLE_ICONE:
+            return None
         numero = self.editor.get_linenumber_from_mouse_event(event)
-        for partie, gauche, droite in self._unites(numero):
-            # Au moins la largeur de l'icone : « s » seul serait une cible de 5 px.
-            if min(gauche, droite - self.TAILLE_ICONE) - 2 <= x <= droite + 2:
-                return numero, partie, gauche, droite
-        return None
+        return numero if self._a_punaiser(numero) else None
 
-    def _valeurs_punaise(self, numero, partie):
-        """{(nature, ligne): mesure} que punaise un clic sur l'unite : la ligne, ou sur le `def`
-        la fonction entiere (toutes ses lignes et son total)."""
-        if partie == 'temps':
-            return {('temps', numero): self._lignes[numero]}
-        if partie == 'operations':
-            return {('operations', numero): self._operations[numero]}
+    def _valeurs_punaise(self, numero):
+        """{(nature, ligne): mesure} que punaise un clic dans la case : ce que la zone montre de la
+        ligne, ou sur le `def` la fonction entiere (toutes ses lignes et son total)."""
+        mesure = self._lignes.get(numero)
+        if not ((mesure is not None and mesure.kind == 'def') or numero in self._fonctions):
+            valeurs = {}
+            if mesure is not None:
+                valeurs[('temps', numero)] = mesure
+            if numero in self._operations:
+                valeurs[('operations', numero)] = self._operations[numero]
+            return valeurs
         premiere, derniere = etendue_fonction(self.editor.toPlainText(), numero)
         valeurs = {}
         for ligne in range(premiere, derniere + 1):
@@ -2285,26 +2288,22 @@ class ProfileResultsPanel(Panel):
             valeurs[('fonctions', numero)] = self._fonctions[numero]
         return valeurs
 
-    def _dessiner_punaise(self, painter, haut, hauteur, fond):
-        """La punaise, a la place de l'unite survolee : pleine si le clic depunaiserait."""
-        numero, partie = self._survol_punaise
-        for p, gauche, droite in self._unites(numero):
-            if p != partie:
-                continue
-            cote = min(hauteur, self.TAILLE_ICONE)
-            gauche = min(gauche, droite - cote)
-            # Le fond est translucide (le code transparait) : le POSER (Source) efface l'unite,
-            # le peindre par-dessus la laisserait lisible sous la punaise.
-            painter.save()
-            painter.setCompositionMode(QPainter.CompositionMode_Source)
-            painter.fillRect(gauche, haut, droite - gauche, hauteur, fond)
-            painter.restore()
-            pleine = self.results_manager.punaise_identique(
-                self._valeurs_punaise(numero, partie))
-            import qtawesome as qta
-            icone = qta.icon('mdi.pin' if pleine else 'mdi.pin-outline',
-                             color=self.editor.palette().windowText().color())
-            icone.paint(painter, QRect(droite - cote, haut + (hauteur - cote) // 2, cote, cote))
+    def _dessiner_punaise(self, painter, haut, hauteur, survol):
+        """La punaise dans sa case. Survolee (`survol` = sa ligne) : pleine si le clic
+        depunaiserait, creuse sinon. Hors survol, sur une ligne punaisee : pleine, estompee."""
+        if survol is None:
+            pleine, opacite = True, 0.45
+        else:
+            pleine, opacite = self.results_manager.punaise_identique(
+                self._valeurs_punaise(survol)), 1.0
+        import qtawesome as qta
+        icone = qta.icon('mdi.pin' if pleine else 'mdi.pin-outline',
+                         color=self.editor.palette().windowText().color())
+        cote = min(hauteur, self.TAILLE_ICONE)
+        painter.save()
+        painter.setOpacity(opacite)
+        icone.paint(painter, QRect(self.PADDING, haut + (hauteur - cote) // 2, cote, cote))
+        painter.restore()
 
     # ---- En-tete : le menu de la zone, sur la PREMIERE ligne visible
     # ------------------------------------------------------------------------
@@ -2318,19 +2317,33 @@ class ProfileResultsPanel(Panel):
         rafraichir() AVANT l'elargissement pour l'en-tete : la largeur vaut alors celle des
         resultats, un en-tete n'elargit donc jamais la zone pour lui seul. Compacte ou non, la
         zone recoit le libelle le plus long qui tient."""
-        mode = self._mode
-        autre = self._autre_zone()
-        if mode == 'horloges' or (mode == 'vide' and self.porte_marqueurs()
-                                  and not (autre is not None and autre.cachee)):
-            # Replie, ou zone des marqueurs sans resultats : la ligne 1 reste aux boutons. Sauf si
-            # l'autre zone est cachee : ce menu est alors le seul qui la rouvre (relecture du
-            # 31/10/2026, l'utilisateur : « tu corriges »).
+        if not self._a_un_entete():
             return ''
         place = self._largeur - 2 * self.MARGE_ENTETE
         for libelle in LIBELLES_ZONES[self.source, self.natures[0]]:
             if self._largeur_libelle(libelle + ' ▾') <= place:
                 return libelle + ' ▾'
         return '▾'
+
+    def _a_un_entete(self):
+        """Source unique, lue par _texte_entete et _calculer_largeur. Replie, ou zone des
+        marqueurs sans resultats : la ligne 1 reste aux boutons - meme si l'autre zone est
+        cachee, qui se rouvre alors en tirant la poignee (cf. _zone_a_rouvrir ; utilisateur,
+        31/10/2026 : « il ne faut pas laisser le ▾ mais juste permettre de réagrandir la zone »)."""
+        mode = self._mode
+        return not (mode == 'horloges' or (mode == 'vide' and self.porte_marqueurs()))
+
+    def _zone_a_rouvrir(self):
+        """L'autre zone, si elle est cachee - ou repliee sur les horloges, largeur nulle - alors que
+        celle-ci n'a rien a redimensionner : tirer la poignee vers le code la rouvre, sans quoi
+        plus rien ne la rouvrirait, cette zone vide n'ayant pas de menu (relecture du 31/10/2026 ;
+        utilisateur, meme jour : « quand je n'affiche un resultat que dans la zone de gauche et que
+        je reduis la zone, je n'arrive pas a la reagrandir »)."""
+        autre = self._autre_zone()
+        if (autre is not None and (autre.cachee or autre.horloges_seules())
+                and not self._largeur_complete()):
+            return autre
+        return None
 
     def _largeur_libelle(self, texte):
         """Largeur de `texte` en police du code, ICONE_HORLOGE comptee a la taille de l'icone."""
@@ -2411,7 +2424,7 @@ class ProfileResultsPanel(Panel):
             zone = next(zone for zone in zones if zone.rang == rang)
             # Jamais les deux zones cachees : il ne resterait plus de menu pour les rouvrir.
             if not choix.isChecked() and not (autre is not None and autre.cachee):
-                zone.cacher()
+                zone.cacher_ou_ceder_la_place()
             else:
                 zone.appliquer_choix(source, nature)
 
@@ -2423,14 +2436,38 @@ class ProfileResultsPanel(Panel):
         if self.cachee:
             self.cachee = False
             sauver_zone_cachee(self.rang, False)
-        self.rafraichir()
+        self._rafraichir_les_zones()
 
     def cacher(self):
         """Entree cochee decochee : la zone ne montre plus rien. Sans boutons, sa largeur tombe a zero, filet compris ;
-        celle des boutons ne garde que leur case. Elle se rouvre par le menu de l'autre zone."""
+        celle des boutons ne garde que leur case. Elle se rouvre par le menu de l'autre zone, ou, si
+        celle-ci n'en a pas (vide), en tirant sa poignee vers le code."""
         self.cachee = True
         sauver_zone_cachee(self.rang, True)
-        self.rafraichir()
+        self._rafraichir_les_zones()
+
+    def cacher_ou_ceder_la_place(self):
+        """Decocher la zone de DROITE n'y laisse pas un trou contre le bord : elle prend le choix
+        de la gauche, qui se cache en gardant l'ancien choix de la droite - la rouvrir rend donc ce
+        qui vient d'etre cache, a gauche (utilisateur, 31/10/2026 : « quand on decoche la zone de
+        droite, on ne devrait pas faire que celle de gauche passe a droite ? », puis « oui fais
+        l'echange » ; ecarte : cacher la droite seule). Les boutons et le fond des lignes restent
+        ainsi avec des resultats en face."""
+        autre = self._autre_zone()
+        if not self.porte_marqueurs() or autre is None or autre.cachee:
+            self.cacher()
+            return
+        source, nature = self.source, self.natures[0]
+        self.appliquer_choix(autre.source, autre.natures[0])
+        autre.source, autre.natures = source, (nature,)
+        sauver_choix_zone(autre.rang, autre.source, autre.natures)
+        autre.cacher()
+
+    def _rafraichir_les_zones(self):
+        """Cacher ou rouvrir une zone change l'en-tete de l'AUTRE (cf. _a_un_entete) : les deux
+        se recalculent - et les fonds du code, qui suivent la zone de droite (cf.
+        _mesures_du_fond) : d'ou refresh() du manager, qui rafraichit aussi les zones."""
+        self.results_manager.refresh()
 
     def _dessiner_demarcation(self, painter, rect):
         """Le filet de separation code / colonne, CALE SUR LA GRILLE DE PIXELS PHYSIQUES.
@@ -2506,7 +2543,7 @@ class ProfileResultsPanel(Panel):
             from spyder.utils.icon_manager import ima
             cote = min(self.TAILLE_ICONE, hauteur)
             ima.icon('profiler').paint(painter, QRect(
-                self.PADDING, haut + (hauteur - cote) // 2, cote, cote))
+                self._x_bouton(), haut + (hauteur - cote) // 2, cote, cote))
         else:
             # Σ (U+03A3) de la police de code, en gras : meme ligne de base que les chiffres (cf.
             # le Σ des `def` dans paintEvent, et pourquoi pas ∑ U+2211).
@@ -2514,7 +2551,7 @@ class ProfileResultsPanel(Panel):
             police.setBold(True)
             painter.setFont(police)
             painter.setPen(self.COULEUR_MARQUEUR)
-            painter.drawText(QRect(self.PADDING, haut, self.TAILLE_ICONE, hauteur),
+            painter.drawText(QRect(self._x_bouton(), haut, self.TAILLE_ICONE, hauteur),
                              int(Qt.AlignCenter), 'Σ')
         painter.restore()
 
@@ -2601,7 +2638,8 @@ class ProfileResultsPanel(Panel):
             return False
         if self.targets_manager.def_line_for(lineno) != lineno:
             return False
-        return event.position().x() <= self.PADDING + self.TAILLE_ICONE
+        x = event.position().x()
+        return self._x_bouton() - self.PADDING <= x <= self._x_bouton() + self.TAILLE_ICONE
 
     def _selectionner_ligne(self, lineno):
         """Place le curseur de l'editeur a la FIN de la ligne, sans faire defiler la vue.
@@ -2628,12 +2666,12 @@ class ProfileResultsPanel(Panel):
         if self._sur_l_entete(event):
             self._ouvrir_menu(event.globalPosition().toPoint())
             return
-        if self._sur_la_poignee(event) and self._largeur_complete():
+        if self._sur_la_poignee(event) and (self._largeur_complete() or self._zone_a_rouvrir()):
             self._redimensionne = True
             return
         cible = self._cible_punaise(event)
         if cible is not None:
-            self.results_manager.basculer_punaise(self._valeurs_punaise(*cible[:2]))
+            self.results_manager.basculer_punaise(self._valeurs_punaise(cible))
             return
         lineno = self.editor.get_linenumber_from_mouse_event(event)
         if self._clic_sur_bouton_horloge(event, lineno):
@@ -2653,19 +2691,26 @@ class ProfileResultsPanel(Panel):
         change de ligne (mouseMoveEvent est appele a chaque pixel parcouru).
         """
         if self._redimensionne:
-            complete = self._largeur_complete()
-            if complete:
-                # Bord droit des zones ensemble : fixe, quel que soit l'etat (cf.
-                # _mode_le_plus_proche).
-                vue = self.editor.viewport()
-                bord_droit = vue.mapToGlobal(QPoint(vue.width(), 0)).x()
-                largeur_visee = bord_droit - event.globalPosition().toPoint().x()
+            # Bord droit des zones ensemble : fixe, quel que soit l'etat (cf.
+            # _mode_le_plus_proche).
+            vue = self.editor.viewport()
+            bord_droit = vue.mapToGlobal(QPoint(vue.width(), 0)).x()
+            largeur_visee = bord_droit - event.globalPosition().toPoint().x()
+            autre = self._zone_a_rouvrir()
+            if autre is not None:
+                # Tiree d'une icone vers le code : la zone cachee revient, avec son choix ; la
+                # repliee, a l'etat intermediaire (enregistre au relachement).
+                if largeur_visee > sum(zone._largeur for zone in self._zones()) + self.TAILLE_ICONE:
+                    if autre.cachee:
+                        autre.appliquer_choix(autre.source, autre.natures[0])
+                    else:
+                        self._basculer_vers('total')
+            elif self._largeur_complete():
                 self._basculer_vers(self._mode_le_plus_proche(largeur_visee))
             return
 
         # Curseur en fleche horizontale au-dessus de la poignee : signale qu'on peut tirer.
-        cible = None if self._sur_l_entete(event) else self._cible_punaise(event)
-        survol = cible[:2] if cible else None
+        survol = None if self._sur_l_entete(event) else self._cible_punaise(event)
         if survol != self._survol_punaise:
             self._survol_punaise = survol
             self.update()

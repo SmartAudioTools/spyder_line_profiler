@@ -185,6 +185,8 @@ def test_la_ligne_du_def_porte_le_total_de_la_fonction():
         pr.publish_operations(ecrire_operations(dossier, source))
         _editor, manager = nouvel_editeur(source)
         panel = manager.panel
+        panel.natures = ('operations',)      # le fond suit ce que montre la zone de droite
+        manager.refresh()
         fonction = manager.fonctions[1]
         assert (fonction.passages, fonction.operations) == (1, 20000013)
         texte = panel._texte_def(None, fonction)
@@ -252,22 +254,31 @@ def test_glisser_la_poignee_de_gauche_ne_fait_pas_osciller_les_zones():
         assert {'complet', 'total', 'horloges'} <= etats, etats
 
 
-def test_le_fond_suit_la_derniere_mesure_lancee():
+def test_le_fond_suit_ce_que_montre_la_zone_de_droite():
+    """Utilisateur, 31/10/2026 : « suit toujours ce qu'il y a dans la colonne de droite »."""
     with tempfile.TemporaryDirectory() as dossier:
         source = fichier_source(dossier)
-        pr.publish(ecrire_temps(dossier, source))
         pr.publish_operations(ecrire_operations(dossier, source))
+        pr.publish(ecrire_temps(dossier, source))       # chronometrage lance en dernier
         _editor, manager = nouvel_editeur(source)
-        assert pr.derniere_mesure() == 'operations'
+        gauche, droite = manager.zones
+        # Attributs poses a la main : appliquer_choix sauverait le choix dans la configuration.
+        gauche.source, gauche.natures = 'derniere', ('temps',)
+        droite.source, droite.natures = 'derniere', ('operations',)
+        manager.refresh()
         assert manager.chaleur(4) == manager.operations[4].heat
         assert 5 in manager.lignes_colorees()          # comptee, jamais chronometree
 
-        pr.publish(ecrire_temps(dossier, source))       # code inchange : les comptes restent
+        droite.natures = ('temps',)
         manager.refresh()
-        assert pr.derniere_mesure() == 'temps'
-        assert manager.operations, "les comptes ont disparu alors que le code n'a pas change"
         assert manager.chaleur(4) == manager.lignes[4].heat
         assert 5 not in manager.lignes_colorees()
+
+        # Droite cachee : plus aucun fond, meme si la gauche montre des temps.
+        droite.cachee = True
+        manager.refresh()
+        assert not manager.lignes_colorees()
+        assert manager.chaleur(4) is None
 
 
 def test_un_code_modifie_retire_l_autre_mesure():
@@ -352,6 +363,14 @@ def test_l_epingle_s_affiche_avant_le_comptage_suivant_et_survit_au_code_modifie
             assert derniere._cellules(3, 'total') == [''], derniere._cellules(3, 'total')
             # L'epingle ne donne pas le fond : c'est le comptage courant.
             assert 3 not in manager.lignes_colorees(), manager.lignes_colorees()
+            # Mais la zone de DROITE sur la reference : le fond suit l'epingle (utilisateur,
+            # 31/10/2026 : « le comptage de reference sur la colonne de droite ne colore rien »).
+            derniere.source, derniere.natures = 'reference', ('operations',)
+            manager.refresh()
+            assert {3, 5} <= set(manager.lignes_colorees()), manager.lignes_colorees()
+            assert manager.chaleur(5) == manager.epingle[5].heat > 0, manager.chaleur(5)
+            derniere.source = 'derniere'
+            manager.refresh()
             reference.grab()                              # paintEvent, en-tete compris
             derniere.grab()
             # L'effacement des mesures garde l'epingle ; le retrait l'enleve, disque compris.
@@ -397,8 +416,8 @@ def test_la_punaise_du_def_punaise_la_fonction_entiere():
             pr.publish_operations(ecrire_operations(dossier, source))
             _editor, manager = nouvel_editeur(source)
             derniere = manager.panel
-            assert [p for p, _g, _d in derniere._unites(1)] == ['def'], derniere._unites(1)
-            valeurs = derniere._valeurs_punaise(1, 'def')
+            assert derniere._a_punaiser(1)
+            valeurs = derniere._valeurs_punaise(1)
             assert sorted(valeurs) == [('fonctions', 1)] + [
                 ('operations', n) for n in (2, 3, 4, 5)], sorted(valeurs)
             manager.basculer_punaise(valeurs)
@@ -408,7 +427,14 @@ def test_la_punaise_du_def_punaise_la_fonction_entiere():
             # La zone de reference montre la fonction punaisee, sans historique de comptage.
             _temps, comptes, fonctions = manager.donnees('reference')
             assert set(comptes) == {2, 3, 4, 5} and fonctions[1].operations == 20000013
-            manager.basculer_punaise(derniere._valeurs_punaise(1, 'def'))
+            # Et elle COLORE : relue sans chaleur, une punaise donnait la couleur du fond
+            # (utilisateur, 31/10/2026 : « le comptage de reference sur la colonne de droite ne
+            # colore rien »). Le `def` sature, comme pour un comptage.
+            derniere.source, derniere.natures = 'reference', ('operations',)
+            manager.refresh()
+            assert manager.chaleur(4) == manager.operations[4].heat > 0, manager.chaleur(4)
+            assert manager.chaleur(1) == 1.0, manager.chaleur(1)
+            manager.basculer_punaise(derniere._valeurs_punaise(1))
             assert pr._PUNAISES == {}, pr._PUNAISES
     finally:
         pr._PUNAISES = {}

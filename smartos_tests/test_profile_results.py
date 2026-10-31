@@ -599,9 +599,8 @@ def test_le_vide_cache_une_zone_sans_filet_et_l_autre_menu_la_rouvre():
         assert gauche._largeur == 0 and gauche._lignes == {}
         droite.cacher()
         assert droite._largeur == droite.TAILLE_ICONE + 2 * droite.PADDING
-        # Les deux cachees (par l'API : le menu l'interdit) : la case des boutons garde son menu,
-        # seul moyen de les rouvrir.
-        assert droite._texte_entete()
+        # Sans en-tete : la ligne 1 reste aux boutons (la poignee rouvre, test suivant).
+        assert droite._texte_entete() == ''
         droite.appliquer_choix('derniere', 'temps')
         assert not droite.cachee and droite._lignes
 
@@ -641,6 +640,32 @@ def test_le_vide_cache_une_zone_sans_filet_et_l_autre_menu_la_rouvre():
         # Les deux visibles : decocher l'entree cochee cache la zone.
         ouvrir(gauche, ('Dernier chronométrage', 0))
         assert gauche.cachee and gauche._largeur == 0
+
+
+def test_decocher_la_droite_y_fait_passer_la_gauche_qui_se_cache_avec_l_ancien_choix():
+    """Les deux visibles, decocher la zone de DROITE n'y laisse pas un trou contre le bord : elle
+    prend le choix de la gauche, et la gauche se cache en gardant l'ancien choix de la droite
+    (utilisateur, 31/10/2026 : « oui fais l'echange »). La rouvrir rend ce qui vient d'etre cache."""
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        _editor, manager = nouvel_editeur(source)
+        gauche, droite = manager.zones
+        gauche.appliquer_choix('derniere', 'temps')
+        droite.appliquer_choix('reference', 'operations')
+        droite.cacher_ou_ceder_la_place()
+        assert not droite.cachee, "la droite ne se cache pas"
+        assert (droite.source, droite.natures) == ('derniere', ('temps',))
+        assert droite._lignes, "la droite montre ce que montrait la gauche"
+        assert gauche.cachee and gauche._largeur == 0
+        assert (gauche.source, gauche.natures) == ('reference', ('operations',))
+        # Rouvrir la gauche rend l'ancien choix de la droite.
+        gauche.appliquer_choix(gauche.source, gauche.natures[0])
+        assert not gauche.cachee and gauche.natures == ('operations',)
+        # Decocher la GAUCHE la cache simplement.
+        gauche.cacher_ou_ceder_la_place()
+        assert gauche.cachee and droite.natures == ('temps',)
 
 
 def test_deux_zones_avec_chacune_son_menu_sur_la_premiere_ligne():
@@ -694,10 +719,12 @@ def test_deux_zones_avec_chacune_son_menu_sur_la_premiere_ligne():
         gauche.grab()
 
 
-def test_un_clic_sur_l_unite_punaise_la_ligne_puis_la_depunaise():
-    """Demande de l'utilisateur (31/10/2026) : « afficher une punaise a la place de l'unite quand
-    on la survole, et punaiser avec un simple clic gauche, puis depunaiser de la meme facon ». La
-    mesure punaisee devient la reference de SA ligne ; sur un `def`, de toute la fonction."""
+def test_un_clic_dans_la_case_punaise_la_ligne_puis_la_depunaise():
+    """Demande de l'utilisateur (31/10/2026) : punaiser d'un simple clic gauche, puis depunaiser de
+    la meme facon ; la punaise d'abord sur l'unite, puis dans sa case a gauche de la zone, le
+    bouton Σ decale a droite (« pour pouvoir ajouter le bouton de punaise à gauche plutot que sur
+    l'unité »). La mesure punaisee devient la reference de SA ligne ; sur un `def`, de toute la
+    fonction."""
     from qtpy.QtCore import QPoint, Qt
     from qtpy.QtTest import QTest
     pr._PUNAISES = {}
@@ -710,12 +737,12 @@ def test_un_clic_sur_l_unite_punaise_la_ligne_puis_la_depunaise():
             gauche, droite = manager.zones
             numero = next(n for n, m in droite._lignes.items() if m.kind != 'def')
             assert numero not in gauche._lignes, "reference deja remplie sans historique"
-            unites = dict((p, (g, d)) for p, g, d in droite._unites(numero))
-            assert 'temps' in unites, droite._unites(numero)
-            g, d = unites['temps']
+            assert droite._a_punaiser(numero)
+            # Le bouton Σ des `def` est passe apres la case de la punaise.
+            assert droite._x_bouton() == droite.PADDING + droite._case_punaise()
             y = editor.blockBoundingGeometry(editor.document().findBlockByNumber(numero - 1)) \
                 .translated(editor.contentOffset()).center().y()
-            position = QPoint((g + d) // 2, int(y))
+            position = QPoint(droite.PADDING + droite.TAILLE_ICONE // 2, int(y))
 
             # QTest.mouseMove ne livre pas de mouseMoveEvent hors ecran : appel direct.
             from qtpy.QtCore import QEvent, QPointF
@@ -723,8 +750,8 @@ def test_un_clic_sur_l_unite_punaise_la_ligne_puis_la_depunaise():
             droite.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(position),
                                               QPointF(droite.mapToGlobal(position)),
                                               Qt.NoButton, Qt.NoButton, Qt.NoModifier))
-            assert droite._survol_punaise == (numero, 'temps'), droite._survol_punaise
-            droite.grab()                               # la punaise dessinee a la place de l'unite
+            assert droite._survol_punaise == numero, droite._survol_punaise
+            droite.grab()                               # la punaise dessinee dans sa case
             QTest.mouseClick(droite, Qt.LeftButton, pos=position)
             QApplication.processEvents()
             assert gauche._lignes[numero].seconds == droite._lignes[numero].seconds, \
@@ -1439,10 +1466,13 @@ def test_un_nouveau_profilage_redeploie_meme_si_la_zone_des_marqueurs_est_vide()
         assert gauche._mode == 'total', f"reste en {gauche._mode} au lieu de se redeployer"
 
 
-def test_la_zone_des_marqueurs_vide_garde_son_menu_si_l_autre_est_cachee():
+def test_la_poignee_de_la_zone_des_marqueurs_vide_rouvre_l_autre():
     """Zone de gauche cachee, zone des marqueurs sans rien a montrer (ses comptages, aucun
-    comptage) : sans en-tete, plus aucun menu ne rouvrait la zone de gauche (relecture du
-    31/10/2026)."""
+    comptage) : sans en-tete, plus rien ne rouvrait la zone de gauche (relecture du 31/10/2026).
+    Pas de ▾ pour autant (utilisateur : « juste permettre de réagrandir la zone ») : tirer la
+    poignee vers le code la rouvre."""
+    from qtpy.QtCore import QEvent, QPoint, QPointF, Qt as _Qt
+    from qtpy.QtGui import QMouseEvent
     with tempfile.TemporaryDirectory() as dossier:
         source = str(Path(dossier) / "m.py")
         Path(source).write_text(SOURCE)
@@ -1454,9 +1484,48 @@ def test_la_zone_des_marqueurs_vide_garde_son_menu_si_l_autre_est_cachee():
         assert not droite._texte_entete(), "vide, la ligne 1 doit rester aux boutons"
 
         gauche.cacher()
+        assert not droite._texte_entete(), "pas de ▾ : la ligne 1 reste aux boutons"
 
-        assert droite._texte_entete(), "plus aucun menu pour rouvrir la zone de gauche"
-        assert droite.width() > 0
+        def souris(type_, x):
+            local = QPointF(x, 30)
+            globale = QPointF(droite.mapToGlobal(QPoint(x, 30)))
+            return QMouseEvent(type_, local, globale, _Qt.LeftButton, _Qt.LeftButton,
+                               _Qt.NoModifier)
+        droite.mousePressEvent(souris(QEvent.MouseButtonPress, 1))
+        droite.mouseMoveEvent(souris(QEvent.MouseMove, -5))
+        assert gauche.cachee, "quelques pixels ne suffisent pas"
+        droite.mouseMoveEvent(souris(QEvent.MouseMove, -60))
+        droite.mouseReleaseEvent(souris(QEvent.MouseButtonRelease, -60))
+        assert not gauche.cachee and gauche._largeur > 0, "la poignee n'a pas rouvert la zone"
+
+
+def test_la_poignee_de_la_zone_des_marqueurs_vide_redeploie_l_autre_repliee():
+    """Utilisateur, 31/10/2026 : « quand je n'affiche un resultat que dans la zone de gauche et que
+    je reduis la zone, je n'arrive pas a la reagrandir ». Repliee sur les horloges, la zone sans
+    boutons tombe a zero : seule la poignee de la zone vide reste a tirer."""
+    from qtpy.QtCore import QEvent, QPoint, QPointF, Qt as _Qt
+    from qtpy.QtGui import QMouseEvent
+    with tempfile.TemporaryDirectory() as dossier:
+        source = str(Path(dossier) / "m.py")
+        Path(source).write_text(SOURCE)
+        pr.publish(ecrire_resultats(dossier, source))
+        editor, manager = nouvel_editeur(source)
+        gauche, droite = manager.zones
+        gauche.appliquer_choix('derniere', 'temps')
+        droite.appliquer_choix('derniere', 'operations')
+        gauche._basculer_vers('horloges')
+        assert gauche._largeur == 0 and droite._mode == 'vide'
+
+        def souris(type_, x):
+            local = QPointF(x, 30)
+            globale = QPointF(droite.mapToGlobal(QPoint(x, 30)))
+            return QMouseEvent(type_, local, globale, _Qt.LeftButton, _Qt.LeftButton,
+                               _Qt.NoModifier)
+        droite.mousePressEvent(souris(QEvent.MouseButtonPress, 1))
+        assert droite._redimensionne, "la poignee de la zone vide ne s'attrape pas"
+        droite.mouseMoveEvent(souris(QEvent.MouseMove, -60))
+        droite.mouseReleaseEvent(souris(QEvent.MouseButtonRelease, -60))
+        assert gauche._mode == 'total' and gauche._largeur > 0, gauche._mode
 
 
 def test_un_nouveau_profilage_ne_touche_pas_un_etat_deja_deploye():
